@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Place {
+  id          String   @id @default(cuid())
+  name        String
+  lat         Float
+  lng         Float
+  category    String   @default("other")
+  tags        String   @default("[]")
+  notes       String   @default("")
+  source      String   @default("manual")
+  imageUrl    String?
+  address     String?
+  rating      Float?
+  isHiddenGem Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  activities TripActivity[]
+}
+
+model Trip {
+  id          String   @id @default(cuid())
+  destination String
+  startDate   String
+  endDate     String
+  preferences String   @default("[]")
+  status      String   @default("draft")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  days TripDay[]
+}
+
+model TripDay {
+  id        String @id @default(cuid())
+  tripId    String
+  dayNumber Int
+  date      String
+
+  trip       Trip           @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  activities TripActivity[]
+}
+
+model TripActivity {
+  id        String  @id @default(cuid())
+  tripDayId String
+  placeId   String?
+  placeName String
+  lat       Float
+  lng       Float
+  timeSlot  String
+  order     Int
+  notes     String  @default("")
+
+  tripDay TripDay @relation(fields: [tripDayId], references: [id], onDelete: Cascade)
+  place   Place?  @relation(fields: [placeId], references: [id], onDelete: SetNull)
+}
+
+model HikingTrail {
+  id            String  @id @default(cuid())
+  osmId         String  @unique
+  name          String
+  country       String?
+  distanceKm    Float?
+  difficulty    String?
+  elevationGain Int?
+  description   String?
+  geometry      String
+  trailType     String  @default("regional")
+  createdAt     DateTime @default(now())
+}
