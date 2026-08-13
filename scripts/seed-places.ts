@@ -1,8 +1,76 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import Database from "better-sqlite3";
 import path from "path";
 
 const dbPath = path.join(process.cwd(), "prisma", "dev.db");
+
+// Create tables if they don't exist
+const rawDb = new Database(dbPath);
+rawDb.exec(`
+  CREATE TABLE IF NOT EXISTS "Place" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "lat" REAL NOT NULL,
+    "lng" REAL NOT NULL,
+    "category" TEXT NOT NULL DEFAULT 'other',
+    "tags" TEXT NOT NULL DEFAULT '[]',
+    "notes" TEXT NOT NULL DEFAULT '',
+    "source" TEXT NOT NULL DEFAULT 'manual',
+    "imageUrl" TEXT,
+    "address" TEXT,
+    "rating" REAL,
+    "isHiddenGem" BOOLEAN NOT NULL DEFAULT false,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS "Trip" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "destination" TEXT NOT NULL,
+    "startDate" TEXT NOT NULL,
+    "endDate" TEXT NOT NULL,
+    "preferences" TEXT NOT NULL DEFAULT '[]',
+    "status" TEXT NOT NULL DEFAULT 'draft',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS "TripDay" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tripId" TEXT NOT NULL,
+    "dayNumber" INTEGER NOT NULL,
+    "date" TEXT NOT NULL,
+    CONSTRAINT "TripDay_tripId_fkey" FOREIGN KEY ("tripId") REFERENCES "Trip" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS "TripActivity" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tripDayId" TEXT NOT NULL,
+    "placeId" TEXT,
+    "placeName" TEXT NOT NULL,
+    "lat" REAL NOT NULL,
+    "lng" REAL NOT NULL,
+    "timeSlot" TEXT NOT NULL,
+    "order" INTEGER NOT NULL,
+    "notes" TEXT NOT NULL DEFAULT '',
+    CONSTRAINT "TripActivity_tripDayId_fkey" FOREIGN KEY ("tripDayId") REFERENCES "TripDay" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "TripActivity_placeId_fkey" FOREIGN KEY ("placeId") REFERENCES "Place" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS "HikingTrail" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "osmId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "country" TEXT,
+    "distanceKm" REAL,
+    "difficulty" TEXT,
+    "elevationGain" INTEGER,
+    "description" TEXT,
+    "geometry" TEXT NOT NULL,
+    "trailType" TEXT NOT NULL DEFAULT 'regional',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS "HikingTrail_osmId_key" ON "HikingTrail"("osmId");
+`);
+rawDb.close();
+
 const adapter = new PrismaBetterSqlite3({ url: `file:${dbPath}` });
 const prisma = new PrismaClient({ adapter });
 
