@@ -27,9 +27,14 @@ export default function HomePage() {
   const [showSidebar, setShowSidebar] = useState(true);
 
   const loadPlaces = useCallback(async () => {
-    const res = await fetch("/api/places");
-    const data = await res.json();
-    setPlaces(data);
+    try {
+      const res = await fetch("/api/places");
+      if (!res.ok) return;
+      const data = await res.json();
+      setPlaces(data);
+    } catch {
+      // ignore fetch errors
+    }
   }, []);
 
   useEffect(() => {

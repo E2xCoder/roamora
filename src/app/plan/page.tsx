@@ -51,9 +51,14 @@ export default function PlanPage() {
   }, []);
 
   async function loadTrips() {
-    const res = await fetch("/api/trips");
-    const data = await res.json();
-    setTrips(data);
+    try {
+      const res = await fetch("/api/trips");
+      if (!res.ok) return;
+      const data = await res.json();
+      setTrips(data);
+    } catch {
+      // ignore fetch errors
+    }
   }
 
   async function createTrip(e: React.FormEvent) {

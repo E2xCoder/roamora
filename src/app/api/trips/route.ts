@@ -3,18 +3,23 @@ import { prisma } from "@/lib/db";
 import { generateTripPlan } from "@/lib/ai-planner";
 
 export async function GET() {
-  const trips = await prisma.trip.findMany({
-    include: {
-      days: {
-        include: { activities: { orderBy: { order: "asc" } } },
-        orderBy: { dayNumber: "asc" },
+  try {
+    const trips = await prisma.trip.findMany({
+      include: {
+        days: {
+          include: { activities: { orderBy: { order: "asc" } } },
+          orderBy: { dayNumber: "asc" },
+        },
       },
-    },
-    orderBy: { createdAt: "desc" },
-  });
-  return NextResponse.json(
-    trips.map((t) => ({ ...t, preferences: JSON.parse(t.preferences) }))
-  );
+      orderBy: { createdAt: "desc" },
+    });
+    return NextResponse.json(
+      trips.map((t) => ({ ...t, preferences: JSON.parse(t.preferences) }))
+    );
+  } catch (err) {
+    console.error("GET /api/trips error:", err);
+    return NextResponse.json([], { status: 200 });
+  }
 }
 
 export async function POST(request: Request) {
