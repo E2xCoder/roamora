@@ -39,17 +39,19 @@ interface GoogleTakeoutGeoJSON {
 
 function guessCategory(name: string, address?: string): string {
   const lower = (name + " " + (address || "")).toLowerCase();
-  if (/restaurant|ristorante|restoran|gaststätte|trattoria|bistro/.test(lower)) return "restaurant";
-  if (/cafe|café|coffee|kaffee|kahve/.test(lower)) return "cafe";
+  if (/restaurant|ristorante|restoran|gaststätte|trattoria|bistro|miam/.test(lower)) return "restaurant";
+  if (/cafe|café|coffee|kaffee|kahve|bar\b/.test(lower)) return "cafe";
   if (/museum|müze|galerie|gallery/.test(lower)) return "museum";
-  if (/park|garden|garten|bahçe|forest|wald/.test(lower)) return "nature";
-  if (/castle|schloss|kale|palace|palast|cathedral|kirche|church|mosque|cami/.test(lower)) return "historic";
-  if (/beach|strand|plaj|sahil/.test(lower)) return "beach";
-  if (/viewpoint|aussicht|lookout|panorama|manzara/.test(lower)) return "viewpoint";
-  if (/trail|wanderweg|hiking|hike|trek/.test(lower)) return "hiking";
-  if (/bar|club|pub|nightclub|disco/.test(lower)) return "nightlife";
+  if (/park|garden|garten|bahçe|forest|wald|valley|valley|tal\b/.test(lower)) return "nature";
+  if (/castle|schloss|kale|şato|palace|palast|cathedral|kirche|church|mosque|cami|kilise|bazilika|chateau|château|fortress|cathedral|anıt/.test(lower)) return "historic";
+  if (/beach|strand|plaj|sahil|plage|spiaggia/.test(lower)) return "beach";
+  if (/viewpoint|aussicht|lookout|panorama|manzara|terrazza/.test(lower)) return "viewpoint";
+  if (/trail|wanderweg|hiking|hike|trek|waterfall|wasserfall|şelale|cascade|falls|klamm|gorge|schlucht/.test(lower)) return "hiking";
+  if (/bar\b|club|pub|nightclub|disco/.test(lower)) return "nightlife";
   if (/shop|market|bazaar|mall|store/.test(lower)) return "shopping";
-  if (/hotel|hostel|airbnb|pension|motel/.test(lower)) return "accommodation";
+  if (/hotel|hostel|airbnb|pension|motel|camping|resort/.test(lower)) return "accommodation";
+  if (/lake|see\b|göl|lac\b|lago/.test(lower)) return "nature";
+  if (/island|ada\b|isola|île/.test(lower)) return "nature";
   return "other";
 }
 
@@ -113,3 +115,104 @@ export function parseGoogleTakeout(jsonContent: string): PlaceFormData[] {
 
   return places;
 }
+
+export interface CsvPlace {
+  name: string;
+  note: string;
+  url: string;
+  tags: string;
+  comment: string;
+}
+
+export function parseGoogleCsv(csvContent: string): CsvPlace[] {
+  const lines = csvContent.split("\n").filter((l) => l.trim());
+  if (lines.length < 2) return [];
+
+  const places: CsvPlace[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
+    const fields = parseCsvLine(line);
+    const name = fields[0]?.trim();
+    if (!name) continue;
+
+    places.push({
+      name,
+      note: fields[1]?.trim() || "",
+      url: fields[2]?.trim() || "",
+      tags: fields[3]?.trim() || "",
+      comment: fields[4]?.trim() || "",
+    });
+  }
+  return places;
+}
+
+function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+export async function geocodePlaces(
+  csvPlaces: CsvPlace[],
+  onProgress?: (done: number, total: number) => void
+): Promise<PlaceFormData[]> {
+  const results: PlaceFormData[] = [];
+  const total = csvPlaces.length;
+
+  for (let i = 0; i < csvPlaces.length; i++) {
+    const place = csvPlaces[i];
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(place.name)}&format=json&limit=1`,
+        { headers: { "User-Agent": "Roamora/1.0" } }
+      );
+      const data = await res.json();
+
+      if (data.length > 0) {
+        results.push({
+          name: place.name,
+          lat: parseFloat(data[0].lat),
+          lng: parseFloat(data[0].lon),
+          category: guessCategory(place.name),
+          tags: place.tags ? place.tags.split(",").map((t: string) => t.trim()) : [],
+          notes: place.note || place.comment || "",
+          source: "google",
+        });
+      }
+    } catch {
+      // skip failed geocoding
+    }
+
+    onProgress?.(i + 1, total);
+
+    // Nominatim rate limit: 1 request per second
+    if (i < csvPlaces.length - 1) {
+      await new Promise((r) => setTimeout(r, 1100));
+    }
+  }
+
+  return results;
+}
+
+export { guessCategory };
