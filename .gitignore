@@ -44,4 +44,9 @@ next-env.d.ts
 *.db
 .agents/
 .windsurf/
+.claude/
+CLAUDE.md
+AGENTS.md
 skills-lock.json
+Takeout/
+/public/thumbnails/
