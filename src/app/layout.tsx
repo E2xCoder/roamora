@@ -1,7 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
+import BottomNav from "@/components/BottomNav";
+import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,17 +17,36 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Roamora",
   description: "Your personal travel & hiking companion",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Roamora",
+  },
+  icons: {
+    icon: "/icons/favicon-32.png",
+    apple: "/icons/apple-touch-icon.png",
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  themeColor: "#6366f1",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
-      lang="en"
+      lang="tr"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex">
-        <Sidebar />
-        <main className="flex-1 md:ml-64 p-4 md:p-6">{children}</main>
+      <body className="min-h-full bg-background overscroll-none">
+        <main className="md:pl-20">{children}</main>
+        <BottomNav />
+        <ServiceWorkerRegistrar />
       </body>
     </html>
   );

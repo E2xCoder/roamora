@@ -1,20 +1,33 @@
 @import "tailwindcss";
 
 :root {
-  --background: #fafaf9;
-  --foreground: #1c1917;
+  --background: #f8fafc;
+  --foreground: #0f172a;
   --card: #ffffff;
-  --card-border: #e7e5e4;
-  --primary: #059669;
-  --primary-hover: #047857;
-  --primary-light: #d1fae5;
+  --card-border: #e2e8f0;
+  --card-hover: #f1f5f9;
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --primary-light: #eef2ff;
+  --primary-glow: rgba(99, 102, 241, 0.15);
   --secondary: #f59e0b;
   --secondary-light: #fef3c7;
-  --muted: #78716c;
-  --danger: #dc2626;
-  --sidebar-bg: #1c1917;
-  --sidebar-text: #d6d3d1;
-  --sidebar-active: #059669;
+  --accent: #ec4899;
+  --accent-light: #fce7f3;
+  --muted: #94a3b8;
+  --muted-fg: #64748b;
+  --danger: #ef4444;
+  --success: #10b981;
+  --surface: #f1f5f9;
+  --glass: rgba(255, 255, 255, 0.8);
+  --glass-border: rgba(226, 232, 240, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.08);
+  --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.1);
+  --radius: 16px;
+  --radius-sm: 12px;
+  --radius-xs: 8px;
 }
 
 @theme inline {
@@ -22,30 +35,46 @@
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-border: var(--card-border);
+  --color-card-hover: var(--card-hover);
   --color-primary: var(--primary);
   --color-primary-hover: var(--primary-hover);
   --color-primary-light: var(--primary-light);
+  --color-primary-glow: var(--primary-glow);
   --color-secondary: var(--secondary);
   --color-secondary-light: var(--secondary-light);
+  --color-accent: var(--accent);
+  --color-accent-light: var(--accent-light);
   --color-muted: var(--muted);
+  --color-muted-fg: var(--muted-fg);
   --color-danger: var(--danger);
-  --color-sidebar-bg: var(--sidebar-bg);
-  --color-sidebar-text: var(--sidebar-text);
-  --color-sidebar-active: var(--sidebar-active);
+  --color-success: var(--success);
+  --color-surface: var(--surface);
+  --color-glass: var(--glass);
+  --color-glass-border: var(--glass-border);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0c0a09;
-    --foreground: #e7e5e4;
-    --card: #1c1917;
-    --card-border: #292524;
-    --primary-light: #064e3b;
-    --secondary-light: #78350f;
-    --muted: #a8a29e;
-    --sidebar-bg: #0c0a09;
+    --background: #0b0f1a;
+    --foreground: #e2e8f0;
+    --card: #151b2e;
+    --card-border: #1e293b;
+    --card-hover: #1e293b;
+    --primary-light: #1e1b4b;
+    --primary-glow: rgba(99, 102, 241, 0.2);
+    --secondary-light: #451a03;
+    --accent-light: #500724;
+    --muted: #64748b;
+    --muted-fg: #94a3b8;
+    --surface: #0f172a;
+    --glass: rgba(15, 23, 42, 0.85);
+    --glass-border: rgba(30, 41, 59, 0.6);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.4);
+    --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.5);
   }
 }
 
@@ -58,5 +87,63 @@ body {
 .leaflet-container {
   height: 100%;
   width: 100%;
-  border-radius: 0.75rem;
+  border-radius: 0;
+}
+
+.glass-panel {
+  background: var(--glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+}
+
+.gradient-primary {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
+}
+
+.gradient-warm {
+  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+}
+
+.gradient-cool {
+  background: linear-gradient(135deg, #06b6d4 0%, #6366f1 100%);
+}
+
+.gradient-nature {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+}
+
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes slide-up {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--primary-glow); }
+  50% { box-shadow: 0 0 0 8px transparent; }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
 }

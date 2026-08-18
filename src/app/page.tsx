@@ -1,58 +1,56 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import dynamic from "next/dynamic";
 import AddPlaceModal from "@/components/AddPlaceModal";
+import PlaceCard from "@/components/PlaceCard";
+import ExtractPanel from "@/components/ExtractPanel";
+import RoutePanel, { type Profile, type RouteLeg } from "@/components/RoutePanel";
+import {
+  CATEGORY_EMOJI,
+  haversine,
+  type Place,
+  type UserPosition,
+} from "@/lib/place-meta";
 import { CATEGORIES } from "@/types";
 import {
-  MapPin, Filter, Plus, Trash2, Link2, Loader2, Search,
-  ExternalLink, X, Check, ChevronDown, Sparkles
+  MapPin, Search, ChevronUp, ChevronDown, X, Route as RouteIcon,
+  Sparkles, Crosshair, Check,
 } from "lucide-react";
 
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
 
-interface Place {
-  id: string;
-  name: string;
-  lat: number;
-  lng: number;
-  category: string;
-  notes: string;
-  address?: string;
-  tags: string[];
-  source: string;
-  imageUrl?: string;
-}
+const PAGE_SIZE = 40;
+const ARRIVAL_RADIUS_M = 40;
 
-interface ExtractedData {
-  title: string;
-  description: string;
-  thumbnailUrl?: string;
-  thumbnailPath?: string;
-  platform: string;
-  placeName?: string;
-  lat?: number;
-  lng?: number;
-  category?: string;
-  sourceUrl: string;
-}
+type PanelView = "places" | "route" | "extract";
 
 export default function HomePage() {
   const [places, setPlaces] = useState<Place[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [clickedPos, setClickedPos] = useState<{ lat: number; lng: number } | null>(null);
-  const [showSidebar, setShowSidebar] = useState(true);
-
-  // URL extraction state
-  const [urlInput, setUrlInput] = useState("");
-  const [extracting, setExtracting] = useState(false);
-  const [extracted, setExtracted] = useState<ExtractedData | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editCategory, setEditCategory] = useState("");
-  const [editLat, setEditLat] = useState("");
-  const [editLng, setEditLng] = useState("");
-  const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showPanel, setShowPanel] = useState(true);
+  const [panelView, setPanelView] = useState<PanelView>("places");
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // --- route state ---
+  const [routeMode, setRouteMode] = useState(false);
+  const [stops, setStops] = useState<Place[]>([]);
+  const [geometry, setGeometry] = useState<[number, number][] | null>(null);
+  const [legs, setLegs] = useState<RouteLeg[]>([]);
+  const [totalDistance, setTotalDistance] = useState(0);
+  const [totalDuration, setTotalDuration] = useState(0);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeFallback, setRouteFallback] = useState(false);
+  const [profile, setProfile] = useState<Profile>("foot");
+
+  // --- live state ---
+  const [live, setLive] = useState(false);
+  const [activeStop, setActiveStop] = useState(0);
+  const [userPos, setUserPos] = useState<UserPosition | null>(null);
+
+  const listRef = useRef<HTMLDivElement>(null);
 
   const loadPlaces = useCallback(async () => {
     try {
@@ -69,60 +67,103 @@ export default function HomePage() {
     loadPlaces();
   }, [loadPlaces]);
 
-  async function handleExtract() {
-    if (!urlInput.trim()) return;
-    setExtracting(true);
-    setExtracted(null);
+  /* ------------------------------ route fetching ----------------------------- */
 
-    try {
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: urlInput.trim() }),
-      });
-      if (!res.ok) throw new Error("Extract failed");
-      const data = await res.json();
-      setExtracted(data.extracted);
-      setEditName(data.extracted.placeName || data.extracted.title || "");
-      setEditCategory(data.extracted.category || "attraction");
-      setEditLat(data.extracted.lat?.toString() || "");
-      setEditLng(data.extracted.lng?.toString() || "");
-    } catch {
-      alert("Link'ten veri çekilemedi. URL'yi kontrol et.");
-    } finally {
-      setExtracting(false);
+  useEffect(() => {
+    if (stops.length < 2) {
+      setGeometry(null);
+      setLegs([]);
+      setTotalDistance(0);
+      setTotalDuration(0);
+      setRouteFallback(false);
+      return;
     }
+
+    let cancelled = false;
+    setRouteLoading(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/route", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            waypoints: stops.map((s) => ({ lat: s.lat, lng: s.lng })),
+            profile,
+          }),
+        });
+        if (!res.ok) throw new Error("route failed");
+        const data = await res.json();
+        if (cancelled) return;
+
+        setGeometry(data.coordinates);
+        setLegs(data.legs || []);
+        setTotalDistance(data.distance || 0);
+        setTotalDuration(data.duration || 0);
+        setRouteFallback(!!data.fallback);
+      } catch {
+        if (!cancelled) {
+          setGeometry(null);
+          setRouteFallback(true);
+        }
+      } finally {
+        if (!cancelled) setRouteLoading(false);
+      }
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [stops, profile]);
+
+  /* -------------------------------- live logic ------------------------------- */
+
+  const distanceToNext = useMemo(() => {
+    if (!userPos || !stops[activeStop]) return null;
+    return haversine(userPos, stops[activeStop]);
+  }, [userPos, stops, activeStop]);
+
+  // Auto-advance to the next stop on arrival.
+  useEffect(() => {
+    if (!live || distanceToNext == null) return;
+    if (distanceToNext < ARRIVAL_RADIUS_M && activeStop < stops.length - 1) {
+      setActiveStop((s) => s + 1);
+    }
+  }, [live, distanceToNext, activeStop, stops.length]);
+
+  /* --------------------------------- actions -------------------------------- */
+
+  function togglePlaceInRoute(place: Place) {
+    setStops((prev) => {
+      const exists = prev.some((s) => s.id === place.id);
+      return exists ? prev.filter((s) => s.id !== place.id) : [...prev, place];
+    });
+    setPanelView("route");
+    setShowPanel(true);
   }
 
-  async function handleSaveExtracted() {
-    if (!editName || !editLat || !editLng) return;
-    setSaving(true);
+  function moveStop(index: number, dir: -1 | 1) {
+    setStops((prev) => {
+      const next = [...prev];
+      const target = index + dir;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
 
-    try {
-      const res = await fetch("/api/extract", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: editName,
-          lat: parseFloat(editLat),
-          lng: parseFloat(editLng),
-          category: editCategory,
-          notes: extracted?.description?.slice(0, 200) || "",
-          sourceUrl: extracted?.sourceUrl,
-          thumbnailPath: extracted?.thumbnailPath,
-          thumbnailUrl: extracted?.thumbnailUrl,
-          platform: extracted?.platform,
-        }),
-      });
-      if (!res.ok) throw new Error("Save failed");
-      setExtracted(null);
-      setUrlInput("");
-      loadPlaces();
-    } catch {
-      alert("Kaydetme başarısız.");
-    } finally {
-      setSaving(false);
-    }
+  function clearRoute() {
+    setStops([]);
+    setLive(false);
+    setActiveStop(0);
+  }
+
+  function toggleLive() {
+    setLive((v) => {
+      if (!v) setActiveStop(0);
+      return !v;
+    });
   }
 
   async function handleSave(data: {
@@ -140,269 +181,286 @@ export default function HomePage() {
 
   async function handleDelete(id: string) {
     await fetch(`/api/places/${id}`, { method: "DELETE" });
+    setStops((prev) => prev.filter((s) => s.id !== id));
     loadPlaces();
   }
 
-  const filteredPlaces = places.filter((p) => {
-    const catMatch = selectedCategory === "all" || p.category === selectedCategory;
-    const searchMatch = !searchQuery || p.name.toLowerCase().includes(searchQuery.toLowerCase());
-    return catMatch && searchMatch;
-  });
+  /* --------------------------------- derived -------------------------------- */
 
-  const categoryCounts = places.reduce<Record<string, number>>((acc, p) => {
-    acc[p.category] = (acc[p.category] || 0) + 1;
-    return acc;
-  }, {});
+  const filteredPlaces = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return places.filter((p) => {
+      const catMatch = selectedCategory === "all" || p.category === selectedCategory;
+      const searchMatch = !q || p.name.toLowerCase().includes(q);
+      return catMatch && searchMatch;
+    });
+  }, [places, selectedCategory, searchQuery]);
+
+  const categoryCounts = useMemo(
+    () =>
+      places.reduce<Record<string, number>>((acc, p) => {
+        acc[p.category] = (acc[p.category] || 0) + 1;
+        return acc;
+      }, {}),
+    [places]
+  );
+
+  // Reset the incremental list when the filter changes.
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+    listRef.current?.scrollTo({ top: 0 });
+  }, [selectedCategory, searchQuery]);
+
+  function handleListScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
+      setVisibleCount((c) => Math.min(c + PAGE_SIZE, filteredPlaces.length));
+    }
+  }
+
+  const stopIds = useMemo(() => new Set(stops.map((s) => s.id)), [stops]);
 
   return (
-    <div className="h-[calc(100vh-3rem)] flex">
-      {showSidebar && (
-        <div className="hidden lg:flex flex-col w-96 border-r border-card-border bg-card overflow-hidden">
-          {/* URL Paste Section */}
-          <div className="p-4 border-b border-card-border bg-gradient-to-b from-primary/5 to-transparent">
-            <div className="flex items-center gap-2 mb-3">
-              <Sparkles size={16} className="text-primary" />
-              <span className="text-sm font-semibold">Link Yapistir</span>
-            </div>
-            <div className="flex gap-2">
-              <div className="flex-1 relative">
-                <Link2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-                <input
-                  type="text"
-                  value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleExtract()}
-                  placeholder="TikTok veya Instagram linki..."
-                  className="w-full pl-9 pr-3 py-2.5 bg-background border border-card-border rounded-xl text-sm focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
-                />
-              </div>
-              <button
-                onClick={handleExtract}
-                disabled={extracting || !urlInput.trim()}
-                className="px-4 py-2.5 bg-primary text-white rounded-xl text-sm font-medium hover:bg-primary-hover disabled:opacity-50 flex items-center gap-1.5 shrink-0"
-              >
-                {extracting ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-                Ekle
-              </button>
-            </div>
+    <div className="h-dvh relative overflow-hidden">
+      <MapView
+        places={places}
+        selectedCategory={selectedCategory}
+        onMapClick={routeMode ? undefined : (lat, lng) => setClickedPos({ lat, lng })}
+        onPlaceDelete={handleDelete}
+        routeMode={routeMode}
+        routeStops={stops}
+        routeGeometry={geometry}
+        activeStop={activeStop}
+        onPlaceToggle={togglePlaceInRoute}
+        liveTracking={live}
+        followUser={live}
+        onUserPosition={setUserPos}
+      />
 
-            {/* Extraction Result */}
-            {extracted && (
-              <div className="mt-3 p-3 bg-background rounded-xl border border-card-border">
-                <div className="flex gap-3">
-                  {extracted.thumbnailUrl && (
-                    <img
-                      src={extracted.thumbnailUrl}
-                      alt=""
-                      className="w-16 h-16 rounded-lg object-cover shrink-0"
-                    />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <input
-                      type="text"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      placeholder="Yer adi..."
-                      className="w-full px-2 py-1 bg-card border border-card-border rounded-lg text-sm font-medium mb-1.5"
-                    />
-                    <div className="flex gap-1.5 mb-1.5">
-                      <select
-                        value={editCategory}
-                        onChange={(e) => setEditCategory(e.target.value)}
-                        className="flex-1 px-2 py-1 bg-card border border-card-border rounded-lg text-xs"
-                      >
-                        {CATEGORIES.map((c) => (
-                          <option key={c} value={c}>{c}</option>
-                        ))}
-                      </select>
-                      <span className="text-[10px] text-muted px-2 py-1 bg-card rounded-lg border border-card-border">
-                        {extracted.platform}
-                      </span>
-                    </div>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={editLat}
-                        onChange={(e) => setEditLat(e.target.value)}
-                        placeholder="Lat"
-                        className="w-20 px-2 py-1 bg-card border border-card-border rounded-lg text-xs"
-                      />
-                      <input
-                        type="text"
-                        value={editLng}
-                        onChange={(e) => setEditLng(e.target.value)}
-                        placeholder="Lng"
-                        className="w-20 px-2 py-1 bg-card border border-card-border rounded-lg text-xs"
-                      />
-                    </div>
-                  </div>
-                </div>
-                {extracted.description && (
-                  <p className="text-[11px] text-muted mt-2 line-clamp-2">
-                    {extracted.description}
-                  </p>
-                )}
-                <div className="flex gap-2 mt-2">
-                  <button
-                    onClick={handleSaveExtracted}
-                    disabled={saving || !editName || !editLat || !editLng}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-primary text-white rounded-lg text-xs font-medium hover:bg-primary-hover disabled:opacity-50"
-                  >
-                    {saving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                    Kaydet
-                  </button>
-                  <button
-                    onClick={() => { setExtracted(null); setUrlInput(""); }}
-                    className="px-3 py-2 bg-background border border-card-border rounded-lg text-xs hover:bg-card"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              </div>
+      {/* Top bar */}
+      <div className="absolute top-4 left-4 right-4 z-[1000] flex items-center gap-3">
+        <div className="glass-panel rounded-2xl px-4 py-2.5 flex items-center gap-2 shadow-[var(--shadow-md)]">
+          <div className="w-8 h-8 rounded-xl gradient-primary flex items-center justify-center">
+            <span className="text-white font-bold text-sm">R</span>
+          </div>
+          <span className="font-bold text-sm hidden sm:block">Roamora</span>
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="glass-panel rounded-2xl shadow-[var(--shadow-md)] flex items-center">
+            <Search size={16} className="ml-4 text-muted" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Yer ara..."
+              className="flex-1 px-3 py-3 bg-transparent text-sm focus:outline-none min-w-0"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="pr-4 text-muted hover:text-foreground"
+              >
+                <X size={14} />
+              </button>
             )}
           </div>
+        </div>
 
-          {/* Search */}
-          <div className="p-3 border-b border-card-border">
-            <div className="relative">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Yer ara..."
-                className="w-full pl-9 pr-3 py-2 bg-background border border-card-border rounded-xl text-sm focus:outline-none focus:border-primary/50"
-              />
-            </div>
-          </div>
+        {/* Route mode toggle */}
+        <button
+          onClick={() => {
+            setRouteMode((v) => !v);
+            setPanelView("route");
+            setShowPanel(true);
+          }}
+          className={`rounded-2xl px-4 py-3 shadow-[var(--shadow-md)] flex items-center gap-2 text-sm font-semibold transition-all shrink-0 ${
+            routeMode
+              ? "gradient-warm text-white"
+              : "glass-panel text-foreground hover:shadow-[var(--shadow-lg)]"
+          }`}
+        >
+          <RouteIcon size={16} />
+          <span className="hidden sm:block">
+            {routeMode ? "Rota Modu" : "Rota"}
+          </span>
+          {stops.length > 0 && (
+            <span
+              className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${
+                routeMode ? "bg-white/25" : "bg-amber-500 text-white"
+              }`}
+            >
+              {stops.length}
+            </span>
+          )}
+        </button>
+      </div>
 
-          {/* Category Filter */}
-          <div className="px-3 py-2 border-b border-card-border">
-            <div className="flex flex-wrap gap-1.5">
+      {/* Category chips */}
+      <div className="absolute top-[76px] left-4 right-4 z-[1000]">
+        <div className="flex gap-2 overflow-x-auto hide-scrollbar py-1">
+          <button
+            onClick={() => setSelectedCategory("all")}
+            className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-medium shadow-[var(--shadow-sm)] transition-all ${
+              selectedCategory === "all"
+                ? "gradient-primary text-white shadow-[var(--shadow-md)]"
+                : "glass-panel text-foreground hover:shadow-[var(--shadow-md)]"
+            }`}
+          >
+            Tumu {places.length > 0 && `(${places.length})`}
+          </button>
+          {CATEGORIES.map((c) =>
+            categoryCounts[c] ? (
               <button
-                onClick={() => setSelectedCategory("all")}
-                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                  selectedCategory === "all"
-                    ? "bg-primary text-white"
-                    : "bg-background border border-card-border hover:border-primary/30"
+                key={c}
+                onClick={() => setSelectedCategory(c)}
+                className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-medium shadow-[var(--shadow-sm)] transition-all flex items-center gap-1.5 ${
+                  selectedCategory === c
+                    ? "gradient-primary text-white shadow-[var(--shadow-md)]"
+                    : "glass-panel text-foreground hover:shadow-[var(--shadow-md)]"
                 }`}
               >
-                Tumu ({places.length})
+                <span>{CATEGORY_EMOJI[c] || "📍"}</span>
+                {c} ({categoryCounts[c]})
               </button>
-              {CATEGORIES.map((c) =>
-                categoryCounts[c] ? (
-                  <button
-                    key={c}
-                    onClick={() => setSelectedCategory(c)}
-                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                      selectedCategory === c
-                        ? "bg-primary text-white"
-                        : "bg-background border border-card-border hover:border-primary/30"
-                    }`}
-                  >
-                    {c} ({categoryCounts[c]})
-                  </button>
-                ) : null
-              )}
-            </div>
-          </div>
+            ) : null
+          )}
+        </div>
+      </div>
 
-          {/* Place Cards */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-2">
-            {filteredPlaces.length === 0 ? (
-              <div className="text-center py-12 text-muted">
-                <MapPin size={32} className="mx-auto mb-3 opacity-30" />
-                <p className="text-sm">Henuz yer yok</p>
-                <p className="text-xs mt-1">Yukardaki kutuya TikTok/Instagram linki yapistir</p>
-              </div>
-            ) : (
-              filteredPlaces.map((place) => (
-                <div
-                  key={place.id}
-                  className="group p-3 bg-background rounded-xl border border-card-border hover:border-primary/30 transition-all cursor-pointer"
-                >
-                  <div className="flex gap-3">
-                    {place.imageUrl ? (
-                      <img
-                        src={place.imageUrl}
-                        alt=""
-                        className="w-14 h-14 rounded-lg object-cover shrink-0"
-                      />
-                    ) : (
-                      <div className="w-14 h-14 rounded-lg bg-card border border-card-border flex items-center justify-center shrink-0">
-                        <MapPin size={18} className="text-muted" />
-                      </div>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-start justify-between">
-                        <h3 className="font-medium text-sm truncate">{place.name}</h3>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDelete(place.id); }}
-                          className="text-muted hover:text-danger p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                      {place.address && (
-                        <p className="text-[11px] text-muted truncate">{place.address}</p>
-                      )}
-                      <div className="flex items-center gap-1.5 mt-1">
-                        <span className="px-2 py-0.5 bg-primary/10 text-primary text-[10px] rounded-full font-medium">
-                          {place.category}
-                        </span>
-                        {place.source !== "manual" && (
-                          <span className="text-[10px] text-muted">{place.source}</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  {place.notes && (
-                    <p className="text-[11px] text-muted mt-2 line-clamp-2">{place.notes}</p>
-                  )}
-                </div>
-              ))
-            )}
+      {/* Route-mode hint */}
+      {routeMode && stops.length === 0 && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[1000] pointer-events-none animate-fade-in">
+          <div className="glass-panel rounded-2xl px-5 py-4 shadow-[var(--shadow-lg)] text-center max-w-[260px]">
+            <Crosshair size={22} className="text-amber-500 mx-auto mb-2" />
+            <p className="text-sm font-semibold">Pinlere dokun</p>
+            <p className="text-xs text-muted mt-1">
+              Sectigin sirayla rota olusturulur
+            </p>
           </div>
         </div>
       )}
 
-      {/* Map */}
-      <div className="flex-1 relative">
-        <button
-          onClick={() => setShowSidebar(!showSidebar)}
-          className="hidden lg:flex absolute top-3 left-3 z-[1000] bg-card/90 backdrop-blur-sm border border-card-border rounded-xl px-3 py-2 text-sm items-center gap-2 hover:bg-card shadow-sm"
-        >
-          <ChevronDown size={14} className={showSidebar ? "rotate-90" : "-rotate-90"} />
-          {showSidebar ? "Gizle" : "Panel"}
-        </button>
-
-        {/* Mobile URL input */}
-        <div className="lg:hidden absolute top-3 left-3 right-3 z-[1000] flex gap-2">
-          <div className="flex-1 relative">
-            <Link2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-            <input
-              type="text"
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              placeholder="TikTok/Instagram linki..."
-              className="w-full pl-9 pr-3 py-2.5 bg-card/90 backdrop-blur-sm border border-card-border rounded-xl text-sm shadow-sm"
-            />
-          </div>
+      {/* Bottom panel */}
+      <div className="absolute bottom-[66px] md:bottom-4 left-0 right-0 md:left-auto md:right-4 md:w-[420px] z-[1000]">
+        <div className="flex items-center justify-center md:justify-end mb-2 px-4 md:px-0">
           <button
-            onClick={handleExtract}
-            disabled={extracting || !urlInput.trim()}
-            className="px-4 py-2.5 bg-primary text-white rounded-xl text-sm shadow-sm disabled:opacity-50"
+            onClick={() => setShowPanel(!showPanel)}
+            className="glass-panel rounded-full px-4 py-2 shadow-[var(--shadow-md)] flex items-center gap-2 text-sm font-medium hover:shadow-[var(--shadow-lg)] transition-all"
           >
-            {extracting ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            {showPanel ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+            {showPanel ? "Gizle" : `${filteredPlaces.length} yer`}
           </button>
         </div>
 
-        <MapView
-          places={places}
-          selectedCategory={selectedCategory}
-          onMapClick={(lat, lng) => setClickedPos({ lat, lng })}
-          onPlaceDelete={handleDelete}
-        />
+        {showPanel && (
+          <div className="glass-panel rounded-t-3xl md:rounded-3xl shadow-[var(--shadow-xl)] animate-slide-up max-h-[58vh] md:max-h-[72vh] flex flex-col overflow-hidden">
+            {/* Tabs */}
+            <div className="flex items-center border-b border-glass-border px-2 pt-3">
+              <Tab
+                active={panelView === "places"}
+                onClick={() => setPanelView("places")}
+                label={`Yerlerim (${filteredPlaces.length})`}
+              />
+              <Tab
+                active={panelView === "route"}
+                onClick={() => setPanelView("route")}
+                label="Rota"
+                badge={stops.length || undefined}
+              />
+              <Tab
+                active={panelView === "extract"}
+                onClick={() => setPanelView("extract")}
+                label="Link"
+              />
+            </div>
+
+            {/* Content */}
+            <div
+              ref={listRef}
+              onScroll={panelView === "places" ? handleListScroll : undefined}
+              className="flex-1 overflow-y-auto hide-scrollbar"
+            >
+              {panelView === "places" && (
+                <div className="p-4 space-y-3">
+                  {filteredPlaces.length === 0 ? (
+                    <div className="text-center py-12">
+                      <div className="w-16 h-16 rounded-3xl bg-primary-light flex items-center justify-center mx-auto mb-4">
+                        <MapPin size={24} className="text-primary" />
+                      </div>
+                      <p className="font-medium text-sm">Henuz yer yok</p>
+                      <p className="text-xs text-muted mt-1">
+                        Link sekmesinden TikTok/Instagram linki yapistir
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {filteredPlaces.slice(0, visibleCount).map((place) => (
+                        <div key={place.id} className="relative">
+                          <PlaceCard
+                            place={place}
+                            categoryIcon={CATEGORY_EMOJI[place.category] || "📍"}
+                            onDelete={handleDelete}
+                          />
+                          <button
+                            onClick={() => togglePlaceInRoute(place)}
+                            className={`absolute bottom-3 right-3 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[10px] font-bold transition-all ${
+                              stopIds.has(place.id)
+                                ? "bg-amber-500 text-white"
+                                : "bg-surface text-muted hover:bg-amber-500 hover:text-white"
+                            }`}
+                          >
+                            {stopIds.has(place.id) ? (
+                              <>
+                                <Check size={11} /> Rotada
+                              </>
+                            ) : (
+                              <>
+                                <RouteIcon size={11} /> Rotaya ekle
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      ))}
+                      {visibleCount < filteredPlaces.length && (
+                        <p className="text-center text-[11px] text-muted py-3">
+                          {filteredPlaces.length - visibleCount} yer daha…
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {panelView === "route" && (
+                <RoutePanel
+                  stops={stops}
+                  legs={legs}
+                  totalDistance={totalDistance}
+                  totalDuration={totalDuration}
+                  loading={routeLoading}
+                  fallback={routeFallback}
+                  profile={profile}
+                  live={live}
+                  activeStop={activeStop}
+                  distanceToNext={distanceToNext}
+                  onProfileChange={setProfile}
+                  onMove={moveStop}
+                  onRemove={(id) =>
+                    setStops((prev) => prev.filter((s) => s.id !== id))
+                  }
+                  onClear={clearRoute}
+                  onToggleLive={toggleLive}
+                  onSetActiveStop={setActiveStop}
+                />
+              )}
+
+              {panelView === "extract" && (
+                <ExtractPanel onPlaceSaved={loadPlaces} />
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {clickedPos && (
@@ -414,5 +472,35 @@ export default function HomePage() {
         />
       )}
     </div>
+  );
+}
+
+function Tab({
+  active,
+  onClick,
+  label,
+  badge,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  badge?: number;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 flex items-center justify-center gap-1.5 pb-3 pt-1 text-sm font-semibold border-b-2 transition-colors ${
+        active
+          ? "border-primary text-primary"
+          : "border-transparent text-muted hover:text-foreground"
+      }`}
+    >
+      {label}
+      {badge != null && (
+        <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-white text-[10px] font-bold">
+          {badge}
+        </span>
+      )}
+    </button>
   );
 }
