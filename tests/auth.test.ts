@@ -31,8 +31,23 @@ describe("password hashing", () => {
 
   it("embeds its parameters so they can be raised later", async () => {
     const hash = await hashPassword("some password");
-    expect(hash.startsWith("scrypt$16384$8$1$")).toBe(true);
-    expect(hash.split("$")).toHaveLength(6);
+    expect(hash.startsWith("scrypt.16384.8.1.")).toBe(true);
+    expect(hash.split(".")).toHaveLength(6);
+  });
+
+  it("contains no '$', which Next.js expands inside .env files", async () => {
+    // Regression: a `$`-delimited hash was silently reduced to "scrypt" by
+    // Next's env variable expansion, so every login failed with no clue why.
+    const hash = await hashPassword("some password");
+    expect(hash).not.toContain("$");
+  });
+
+  it("still verifies a legacy $-delimited hash", async () => {
+    // Anyone who generated credentials before the delimiter changed must not
+    // be locked out.
+    const legacy = (await hashPassword("legacy password")).replace(/\./g, "$");
+    expect(await verifyPassword("legacy password", legacy)).toBe(true);
+    expect(await verifyPassword("wrong", legacy)).toBe(false);
   });
 
   it("refuses to hash a short password", async () => {
@@ -42,48 +57,56 @@ describe("password hashing", () => {
   it("returns false for malformed stored hashes instead of throwing", async () => {
     expect(await verifyPassword("x", "")).toBe(false);
     expect(await verifyPassword("x", "not-a-hash")).toBe(false);
-    expect(await verifyPassword("x", "scrypt$0$0$0$aa$bb")).toBe(false);
-    expect(await verifyPassword("x", "bcrypt$1$2$3$aa$bb")).toBe(false);
+    expect(await verifyPassword("x", "scrypt.0.0.0.aa.bb")).toBe(false);
+    expect(await verifyPassword("x", "bcrypt.1.2.3.aa.bb")).toBe(false);
+    // What a $-delimited hash collapses to after Next expands it.
+    expect(await verifyPassword("x", "scrypt")).toBe(false);
   });
 });
 
 describe("sessions", () => {
-  it("accepts a session it just issued", () => {
-    const { value } = createSession(SECRET);
-    expect(verifySession(value, SECRET)).toBe(true);
+  it("accepts a session it just issued", async () => {
+    const { value } = await createSession(SECRET);
+    expect(await verifySession(value, SECRET)).toBe(true);
   });
 
-  it("rejects a session signed with a different secret", () => {
-    const { value } = createSession(SECRET);
-    expect(verifySession(value, "a-completely-different-secret-value")).toBe(false);
+  it("rejects a session signed with a different secret", async () => {
+    const { value } = await createSession(SECRET);
+    expect(await verifySession(value, "a-completely-different-secret-value")).toBe(
+      false
+    );
   });
 
-  it("rejects a tampered payload", () => {
-    const { value } = createSession(SECRET);
-    const [body, sig] = value.split(".");
+  it("rejects a tampered payload", async () => {
+    const { value } = await createSession(SECRET);
+    const sig = value.split(".")[1];
     const forged = Buffer.from(
       JSON.stringify({ iat: 0, exp: 9999999999 })
     ).toString("base64url");
-    expect(verifySession(`${forged}.${sig}`, SECRET)).toBe(false);
-    expect(body).toBeTruthy();
+    expect(await verifySession(`${forged}.${sig}`, SECRET)).toBe(false);
   });
 
-  it("rejects missing or malformed tokens", () => {
-    expect(verifySession(undefined, SECRET)).toBe(false);
-    expect(verifySession("", SECRET)).toBe(false);
-    expect(verifySession("no-dot", SECRET)).toBe(false);
-    expect(verifySession(".", SECRET)).toBe(false);
+  it("rejects missing or malformed tokens", async () => {
+    expect(await verifySession(undefined, SECRET)).toBe(false);
+    expect(await verifySession("", SECRET)).toBe(false);
+    expect(await verifySession("no-dot", SECRET)).toBe(false);
+    expect(await verifySession(".", SECRET)).toBe(false);
   });
 
-  it("rejects an expired session", () => {
+  it("rejects an expired session", async () => {
     // Forge a correctly-signed but already-expired payload.
     const expired = Buffer.from(
       JSON.stringify({ iat: 1000, exp: 2000 })
     ).toString("base64url");
-    const sig = createHmac("sha256", SECRET)
-      .update(expired)
-      .digest("base64url");
-    expect(verifySession(`${expired}.${sig}`, SECRET)).toBe(false);
+    const sig = createHmac("sha256", SECRET).update(expired).digest("base64url");
+    expect(await verifySession(`${expired}.${sig}`, SECRET)).toBe(false);
+  });
+
+  it("runs on Web Crypto so the Edge middleware can verify sessions", () => {
+    // Regression: this module imported node:crypto, which the Edge runtime
+    // does not provide. Middleware only survived because auth was unconfigured
+    // and it returned before verifying.
+    expect(typeof globalThis.crypto?.subtle?.importKey).toBe("function");
   });
 });
 

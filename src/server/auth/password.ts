@@ -25,7 +25,13 @@ function scryptAsync(
  * scrypt is memory-hard and built in, so this adds no native dependency and
  * no recurring cost — both of which matter for a personal deployment (§8).
  *
- * Format: scrypt$N$r$p$<salt-hex>$<hash-hex>
+ * Format: `scrypt.N.r.p.<salt-hex>.<hash-hex>`
+ *
+ * Dots, not the conventional `$`: Next.js expands `$NAME` inside .env files as
+ * a reference to another variable, so a `$`-delimited hash silently became
+ * `scrypt` with the parameters stripped, and every login failed with no
+ * indication why. Dots have no meaning to the .env parser.
+ *
  * Storing the parameters alongside the digest means they can be raised later
  * without invalidating existing hashes.
  */
@@ -54,7 +60,7 @@ export async function hashPassword(password: string): Promise<string> {
     PARAMS.p,
     salt.toString("hex"),
     derived.toString("hex"),
-  ].join("$");
+  ].join(".");
 }
 
 export async function verifyPassword(
@@ -62,7 +68,9 @@ export async function verifyPassword(
   stored: string
 ): Promise<boolean> {
   try {
-    const parts = stored.split("$");
+    // Accept `$` as well, so a hash generated before the delimiter changed
+    // still verifies rather than locking the user out.
+    const parts = stored.split(stored.includes(".") ? "." : "$");
     if (parts.length !== 6 || parts[0] !== "scrypt") return false;
 
     const [, nRaw, rRaw, pRaw, saltHex, hashHex] = parts;

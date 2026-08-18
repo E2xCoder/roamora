@@ -37,7 +37,7 @@ export async function POST(request: Request) {
       return apiError("Parola hatalı", "INVALID_CREDENTIALS", 401);
     }
 
-    const session = createSession(config.AUTH_SECRET!);
+    const session = await createSession(config.AUTH_SECRET!);
     const response = NextResponse.json({ ok: true });
 
     response.cookies.set(SESSION_COOKIE, session.value, {

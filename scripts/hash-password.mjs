@@ -36,8 +36,11 @@ const derived = await scryptAsync(password, salt, 64, {
   maxmem: 64 * 1024 * 1024,
 });
 
-const hash = ["scrypt", N, r, p, salt.toString("hex"), derived.toString("hex")].join("$");
-const secret = randomBytes(32).toString("base64");
+// Dot-delimited: Next.js expands `$NAME` inside .env files, which silently
+// stripped the parameters out of a `$`-delimited hash and broke every login.
+const hash = ["scrypt", N, r, p, salt.toString("hex"), derived.toString("hex")].join(".");
+// base64url so the secret cannot contain `+` or `/` that a shell might mangle.
+const secret = randomBytes(32).toString("base64url");
 
 console.log("\n.env dosyana ekle:\n");
 console.log(`AUTH_SECRET=${secret}`);

@@ -8,6 +8,10 @@ import {
 /**
  * Gates the whole application behind a session cookie.
  *
+ * Next.js 16 renamed Middleware to Proxy: the file must be `proxy.ts` at the
+ * project root and export `proxy`. Under the old name and export the gate was
+ * silently not applied — anonymous requests to /api/places returned 200.
+ *
  * When AUTH_SECRET / ROAMORA_PASSWORD_HASH are absent the instance runs open —
  * otherwise a fresh clone would be unusable — but `/api/auth/status` reports
  * that state so the UI can warn instead of implying the instance is secured.
@@ -15,7 +19,7 @@ import {
 
 const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/auth/status"];
 
-export function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const secret = process.env.AUTH_SECRET;
   const passwordHash = process.env.ROAMORA_PASSWORD_HASH;
 
@@ -26,9 +30,11 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (verifySession(request.cookies.get(SESSION_COOKIE)?.value, secret!)) {
-    return NextResponse.next();
-  }
+  const valid = await verifySession(
+    request.cookies.get(SESSION_COOKIE)?.value,
+    secret!
+  );
+  if (valid) return NextResponse.next();
 
   // API callers get a status code they can act on; humans get the login page.
   if (pathname.startsWith("/api/")) {
