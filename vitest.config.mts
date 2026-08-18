@@ -11,6 +11,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
+      // `server-only` throws on import outside a React Server Component.
+      // Server modules are plain functions under test, so it is stubbed out.
+      "server-only": path.resolve(import.meta.dirname, "tests/stubs/server-only.ts"),
     },
   },
 });

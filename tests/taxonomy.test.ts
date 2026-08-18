@@ -47,6 +47,19 @@ describe("taxonomy", () => {
       expect(legacyCategoryToId("hiking")).toBe("hike");
     });
 
+    it("passes through values that are already taxonomy ids", () => {
+      // Regression: the ingestion pipeline emits taxonomy ids directly. Only
+      // the legacy table was consulted, so a place classified as `castle` was
+      // stored with categoryId "other".
+      for (const id of ["castle", "bakery", "viewpoint", "local-experience", "transport"]) {
+        expect(legacyCategoryToId(id)).toBe(id);
+      }
+    });
+
+    it("trims surrounding whitespace", () => {
+      expect(legacyCategoryToId("  castle  ")).toBe("castle");
+    });
+
     it("is case-insensitive", () => {
       expect(legacyCategoryToId("Restaurant")).toBe("restaurant");
       expect(legacyCategoryToId("CAFE")).toBe("cafe");

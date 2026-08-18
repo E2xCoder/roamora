@@ -161,7 +161,7 @@ Ordered per §96. Each phase ends green: `typecheck && lint && test && build`, w
 | **1 — Foundation** ✅ | Single DB; normalized schema; data migration of 9320 rows; config module; zod validation; honest error reporting; capability detection; Vitest; `.env.example`; npm scripts | **Done** — see §11. Auth deferred to 1b. |
 | **1b — Auth** ✅ | scrypt password hashing, signed session cookie, middleware gate, login page, `auth:hash` script | **Done** — see §12 |
 | **2 — Places** 🟡 | Place service, taxonomy, provenance, `/api/places` with pagination+bbox, place detail page, sources & media surfaced | Detail page, provenance, soft delete and nearby done; media upload and full edit UI remain |
-| **3 — Import** | Ingestion pipeline, source providers, location engine, OCR, classification, dedup, staged progress UI | TikTok/Instagram/Komoot/generic URL import end-to-end with honest failure reporting |
+| **3 — Import** 🟡 | Ingestion pipeline, source providers, location engine, OCR, classification, dedup, staged progress UI | Pipeline, six providers, dedup and staged UI done — see §13. OCR/screenshot and file upload remain |
 | **4 — Trips** | Bucket list, trip model, optimizer, itinerary timeline, route visualization, three variants, manual editing | Itinerary generated from real geography; lock + regenerate works |
 | **5 — Live travel** | Active-trip screen, GPS progress, arrival detection, visited marking, track recording | Verified on a physical phone |
 | **6 — Hiking** | Komoot ingestion, GPX import/parse, HikingRoute entity, elevation, map rendering | GPX renders; Komoot URL preserved |
@@ -313,3 +313,27 @@ Verified against the running application, not just compiled.
 A PATCH that only changed `notes` therefore rewrote the record's classification and provenance. Observed live: a Wikivoyage row flipped `REFERENCE → MANUAL` and `attraction → other`, leaking a reference place into the personal pool — defeating the §33 separation the whole phase was built around.
 
 Fixed by declaring the update schema explicitly with no defaults. `scripts/repair-source-types.ts` reconstructs `sourceType` from the untouched `PlaceSource.platform`; the one affected row's category was restored from the pre-migration backup. Four regression tests now assert that a partial patch materialises nothing.
+
+---
+
+## 13. Phase 3 — ingestion pipeline
+
+**The pipeline works without yt-dlp.** That was the central design decision: TikTok and YouTube publish keyless oEmbed endpoints, Google Maps encodes coordinates in the URL, and everything else exposes OpenGraph. yt-dlp became an *enrichment* step rather than a prerequisite, so the core loop is usable today.
+
+**Stages** (`src/server/services/ingestion.ts`): validate → detect → metadata → media → location → geocode → classify → dedupe. Each reports `ok | skipped | failed` with a human-readable detail, rendered as a checklist in the UI.
+
+**Source providers** (`src/server/providers/source/`): TikTok (oEmbed → OpenGraph), YouTube (oEmbed), Instagram (OpenGraph, honest about login walls), Google Maps (three URL coordinate forms plus short-link resolution), Komoot, and a generic OpenGraph fallback. All behind one `SourceProvider` interface.
+
+**Location engine** (`location-extraction.ts`): ordered strategies — pin emoji, labelled "location:", prepositions, capitalised multi-word phrases, hashtags — each carrying a base confidence. A 40-word stopword list keeps `#travel`, `#fyp` and `#wanderlust` out. Geocoding then corroborates or refutes: a hit raises confidence, a miss cuts it to ≤ 0.35. Text plus geocoding never reaches certainty; only an explicit coordinate does (0.97).
+
+**Deduplication** (§14): normalized-name Dice similarity plus geographic proximity, with exact source-URL and platform-id shortcuts. Verified live — Charles Bridge imported from Google Maps and then from Wikipedia produced **one place with two sources**, 90 m apart, name similarity 1.0.
+
+**SSRF protection** (§64): `url-safety.ts` rejects non-HTTP schemes, loopback, RFC1918, CGNAT, link-local (including `169.254.169.254`) and IPv4-mapped IPv6, and resolves DNS so a public hostname pointing inside the network is caught. Response bodies are capped at 2 MB with a 15 s timeout.
+
+**Two real bugs caught by verification**
+
+1. *Confident nonsense.* A deleted TikTok still serves the platform's chrome. The pipeline read "TikTok - Make Your Day" as post content, extracted "Make Your Day" as a place, geocoded it to an unrelated shop in Greece, and reported **0.65 confidence** — precisely the fabrication §99 forbids. `boilerplate.ts` now rejects platform chrome outright unless the source supplied coordinates; the same URL returns `422 BOILERPLATE_ONLY` explaining the post is deleted, private or region-locked.
+
+2. *Category silently downgraded.* The pipeline emits taxonomy ids, but the save path ran them through `legacyCategoryToId`, which only knew the old free-text values — so a place classified `castle` was stored as `other`. The resolver now passes through values that are already valid ids.
+
+**Verified end-to-end:** dead TikTok → honest 422; Google Maps URL → Prague Castle at 0.97 confidence, auto-classified `castle`; Wikipedia → same bridge within 10 m of the Maps coordinate; duplicate detected and merged; notes preserved. 99 tests, `npm run verify` clean.

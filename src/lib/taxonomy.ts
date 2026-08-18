@@ -91,9 +91,20 @@ const LEGACY_MAP: Record<string, string> = {
   other: "other",
 };
 
-export function legacyCategoryToId(legacy: string | null | undefined): string {
-  if (!legacy) return "other";
-  return LEGACY_MAP[legacy.toLowerCase()] ?? "other";
+/**
+ * Resolves any category string to a taxonomy id.
+ *
+ * Accepts three shapes: a value that is already a taxonomy id (the ingestion
+ * pipeline emits these), a legacy free-text value from the seeded data, or
+ * something unknown. Ids used to fall through to "other" because only the
+ * legacy table was consulted, so a place classified as `castle` was stored as
+ * `other`.
+ */
+export function legacyCategoryToId(input: string | null | undefined): string {
+  if (!input) return "other";
+  const key = input.toLowerCase().trim();
+  if (CATEGORY_BY_ID.has(key)) return key;
+  return LEGACY_MAP[key] ?? "other";
 }
 
 /** Provenance vocabularies (spec §11, §33). */
