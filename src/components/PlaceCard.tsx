@@ -1,19 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { Trash2 } from "lucide-react";
 
-interface Place {
-  id: string;
-  name: string;
-  lat: number;
-  lng: number;
-  category: string;
-  notes: string;
-  address?: string;
-  tags: string[];
-  source?: string;
-  imageUrl?: string;
-}
+import type { Place } from "@/lib/place-meta";
 
 interface PlaceCardProps {
   place: Place;
@@ -59,10 +49,16 @@ export default function PlaceCard({ place, categoryIcon, onDelete }: PlaceCardPr
         <div className="flex-1 min-w-0 flex flex-col justify-between">
           <div>
             <div className="flex items-start justify-between gap-2">
-              <h3 className="font-semibold text-sm leading-tight line-clamp-2">{place.name}</h3>
+              <Link
+                href={`/place/${place.id}`}
+                className="font-semibold text-sm leading-tight line-clamp-2 hover:text-primary transition-colors"
+              >
+                {place.name}
+              </Link>
               <button
                 onClick={(e) => { e.stopPropagation(); onDelete(place.id); }}
                 className="text-muted hover:text-danger p-1 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                aria-label={`${place.name} yerini sil`}
               >
                 <Trash2 size={13} />
               </button>

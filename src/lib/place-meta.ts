@@ -46,10 +46,12 @@ export interface Place {
   lng: number;
   category: string;
   notes: string;
-  address?: string;
+  address?: string | null;
+  city?: string | null;
+  country?: string | null;
   tags: string[];
   source?: string;
-  imageUrl?: string;
+  imageUrl?: string | null;
 }
 
 export interface UserPosition {

@@ -159,7 +159,8 @@ Ordered per §96. Each phase ends green: `typecheck && lint && test && build`, w
 | Phase | Scope | Exit criteria |
 |---|---|---|
 | **1 — Foundation** ✅ | Single DB; normalized schema; data migration of 9320 rows; config module; zod validation; honest error reporting; capability detection; Vitest; `.env.example`; npm scripts | **Done** — see §11. Auth deferred to 1b. |
-| **2 — Places** | Place service, taxonomy, provenance, `/api/places` with pagination+bbox, place detail page, sources & media surfaced | Place detail renders source + media; map loads via bbox, not full-table |
+| **1b — Auth** ✅ | scrypt password hashing, signed session cookie, middleware gate, login page, `auth:hash` script | **Done** — see §12 |
+| **2 — Places** 🟡 | Place service, taxonomy, provenance, `/api/places` with pagination+bbox, place detail page, sources & media surfaced | Detail page, provenance, soft delete and nearby done; media upload and full edit UI remain |
 | **3 — Import** | Ingestion pipeline, source providers, location engine, OCR, classification, dedup, staged progress UI | TikTok/Instagram/Komoot/generic URL import end-to-end with honest failure reporting |
 | **4 — Trips** | Bucket list, trip model, optimizer, itinerary timeline, route visualization, three variants, manual editing | Itinerary generated from real geography; lock + regenerate works |
 | **5 — Live travel** | Active-trip screen, GPS progress, arrival detection, visited marking, track recording | Verified on a physical phone |
@@ -285,3 +286,30 @@ Verified against the running application, not just compiled.
 - 11 `react-hooks/set-state-in-effect` warnings remain, demoted from error with justification in `eslint.config.mjs`; converting them is phase 9 work.
 - `overpass.ts` still queries only `node` elements (**D7 open**) — addressed in phase 3 with the source-provider rework.
 - Provider interfaces are not yet extracted; phase 1 introduced the config module and two services (`geocode`, `capabilities`) that phase 2–3 will formalize behind the interfaces in §3.
+
+---
+
+## 12. Phase 1b & 2 — delivered
+
+**Authentication (§64)**
+- scrypt from Node's standard library — memory-hard, no native dependency, no recurring cost. Parameters are embedded in the hash so they can be raised later without invalidating existing credentials.
+- Stateless HMAC-signed session cookie; httpOnly, SameSite=Lax, Secure in production. No session table needed for one user.
+- `middleware.ts` gates every route; API callers get `401 UNAUTHENTICATED`, browsers are redirected to `/login`.
+- **If `AUTH_SECRET` / `ROAMORA_PASSWORD_HASH` are unset the instance runs open**, so a fresh clone is usable — but `/api/auth/status` reports that, so the UI can warn rather than implying the instance is protected.
+- `npm run auth:hash -- "password"` prints both values ready to paste into `.env`.
+- The login redirect only accepts same-origin relative paths, so a crafted `?next=` cannot bounce the browser off-site.
+- 12 tests: verification, salt uniqueness, malformed-hash handling, signature forgery, expiry, and the configured/unconfigured decision.
+
+**Place detail (§17)**
+- `/api/places/:id` returns sources, media, tags, per-field provenance, visits and nearby places (3 km box).
+- Detail page shows where a place came from, its confidence bar and location source, the original links, editable notes, coordinates, a map and nearby saves.
+- **Soft delete**: `deletedAt` is set, so a place removed by accident keeps its sources and can be recovered. Verified: the row disappears from queries, re-fetch is 404, and a second delete is 404 rather than an error.
+- `PATCH` records `MANUAL` provenance per edited field, so later automated passes cannot overwrite a human's correction (§90).
+
+**A destructive bug found and fixed during verification**
+
+`updatePlaceSchema` was defined as `createPlaceSchema.partial()`. `.partial()` makes keys optional but **keeps their defaults**, so zod materialised `category: "other"`, `sourceType: "MANUAL"`, `source: "manual"`, `tags: []` for every field the caller omitted.
+
+A PATCH that only changed `notes` therefore rewrote the record's classification and provenance. Observed live: a Wikivoyage row flipped `REFERENCE → MANUAL` and `attraction → other`, leaking a reference place into the personal pool — defeating the §33 separation the whole phase was built around.
+
+Fixed by declaring the update schema explicitly with no defaults. `scripts/repair-source-types.ts` reconstructs `sourceType` from the untouched `PlaceSource.platform`; the one affected row's category was restored from the pre-migration backup. Four regression tests now assert that a partial patch materialises nothing.

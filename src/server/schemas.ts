@@ -79,7 +79,39 @@ export const createPlaceSchema = z.object({
 
 export type CreatePlaceInput = z.infer<typeof createPlaceSchema>;
 
-export const updatePlaceSchema = createPlaceSchema.partial();
+/**
+ * Update schema — deliberately NOT `createPlaceSchema.partial()`.
+ *
+ * `.partial()` makes keys optional but keeps their `.default()`s, so zod
+ * materialises `category: "other"`, `sourceType: "MANUAL"`, `tags: []` and
+ * friends for any field the caller omitted. A PATCH that only touched `notes`
+ * therefore rewrote the record's classification and provenance, moving
+ * reference rows into the personal pool. Every field here is optional with no
+ * default, so an absent key stays absent.
+ */
+export const updatePlaceSchema = z.object({
+  name: z.string().trim().min(1).max(300).optional(),
+  lat: latitude.optional(),
+  lng: longitude.optional(),
+  category: z.string().trim().min(1).optional(),
+  categoryId: z.string().trim().min(1).optional(),
+  subcategory: z.string().trim().max(120).optional(),
+  notes: z.string().max(5000).optional(),
+  tags: z.array(z.string().trim().min(1).max(60)).max(50).optional(),
+  address: z.string().max(500).optional(),
+  city: z.string().max(200).optional(),
+  country: z.string().max(200).optional(),
+  countryCode: z.string().length(2).optional(),
+  imageUrl: z.string().url().max(2000).optional(),
+  website: z.string().url().max(2000).optional(),
+  sourceType: z.enum(SOURCE_TYPES).optional(),
+  source: z.string().trim().min(1).optional(),
+  locationSource: z.enum(LOCATION_SOURCES).optional(),
+  locationConfidence: z.number().min(0).max(1).optional(),
+  estimatedVisitMinutes: z.number().int().min(0).max(1440).optional(),
+  rating: z.number().min(0).max(5).optional(),
+  isHiddenGem: z.boolean().optional(),
+});
 
 export const routeRequestSchema = z.object({
   waypoints: z

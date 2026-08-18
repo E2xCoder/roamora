@@ -16,7 +16,8 @@
     "db:studio": "prisma studio",
     "db:migrate-phase1": "tsx --env-file=.env scripts/migrate-phase1.ts",
     "db:seed-reference": "tsx --env-file=.env scripts/seed-places.ts",
-    "icons": "node scripts/generate-icons.mjs"
+    "icons": "node scripts/generate-icons.mjs",
+    "auth:hash": "node scripts/hash-password.mjs"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.9.1",

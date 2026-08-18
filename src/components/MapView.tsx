@@ -268,14 +268,22 @@ function PlacePopup({
       {place.notes && (
         <p className="text-xs mt-2 text-gray-600 line-clamp-3">{place.notes}</p>
       )}
-      {onDelete && (
-        <button
-          onClick={() => onDelete(place.id)}
-          className="mt-2 text-xs text-red-500 hover:text-red-700 font-medium"
+      <div className="flex items-center gap-3 mt-2">
+        <a
+          href={`/place/${place.id}`}
+          className="text-xs font-semibold text-indigo-600 hover:text-indigo-800"
         >
-          Sil
-        </button>
-      )}
+          Detaya git →
+        </a>
+        {onDelete && (
+          <button
+            onClick={() => onDelete(place.id)}
+            className="text-xs text-red-500 hover:text-red-700 font-medium"
+          >
+            Sil
+          </button>
+        )}
+      </div>
     </div>
   );
 }

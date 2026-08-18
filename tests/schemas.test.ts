@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   placeQuerySchema,
   createPlaceSchema,
+  updatePlaceSchema,
   routeRequestSchema,
   importUrlSchema,
 } from "@/server/schemas";
@@ -83,6 +84,38 @@ describe("createPlaceSchema", () => {
     expect(
       createPlaceSchema.safeParse({ ...valid, locationConfidence: 0.9 }).success
     ).toBe(true);
+  });
+});
+
+describe("updatePlaceSchema", () => {
+  it("does not materialise fields the caller omitted", () => {
+    // Regression: this was built with createPlaceSchema.partial(), which keeps
+    // the defaults. Patching only `notes` silently rewrote category, tags,
+    // source and sourceType — moving REFERENCE rows into the personal pool.
+    const r = updatePlaceSchema.parse({ notes: "sunset spot" });
+    expect(Object.keys(r)).toEqual(["notes"]);
+    expect(r).not.toHaveProperty("category");
+    expect(r).not.toHaveProperty("categoryId");
+    expect(r).not.toHaveProperty("sourceType");
+    expect(r).not.toHaveProperty("source");
+    expect(r).not.toHaveProperty("tags");
+    expect(r).not.toHaveProperty("isHiddenGem");
+  });
+
+  it("accepts an empty patch without inventing anything", () => {
+    expect(Object.keys(updatePlaceSchema.parse({}))).toEqual([]);
+  });
+
+  it("still validates the fields that are supplied", () => {
+    expect(updatePlaceSchema.safeParse({ lat: 999 }).success).toBe(false);
+    expect(updatePlaceSchema.safeParse({ name: "  " }).success).toBe(false);
+    expect(updatePlaceSchema.safeParse({ sourceType: "NOPE" }).success).toBe(false);
+    expect(updatePlaceSchema.safeParse({ locationConfidence: 2 }).success).toBe(false);
+  });
+
+  it("passes through an explicit value unchanged", () => {
+    const r = updatePlaceSchema.parse({ sourceType: "PERSONAL" });
+    expect(r.sourceType).toBe("PERSONAL");
   });
 });
 
