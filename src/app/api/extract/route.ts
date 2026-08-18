@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { extractFromUrl, extractPlaceWithAI } from "@/lib/extract-place";
-import { legacyCategoryToId, AUTO_SAVE_CONFIDENCE } from "@/lib/taxonomy";
+import {
+  legacyCategoryToId,
+  normalizeForSearch,
+  AUTO_SAVE_CONFIDENCE,
+} from "@/lib/taxonomy";
 import { importUrlSchema } from "@/server/schemas";
 import { apiError, parseBody, serverError } from "@/server/api-utils";
 import { getCapabilities } from "@/server/services/capabilities";
@@ -173,6 +177,7 @@ export async function PUT(request: Request) {
     const place = await prisma.place.create({
       data: {
         name: input.name,
+        nameNormalized: normalizeForSearch(input.name),
         lat: input.lat,
         lng: input.lng,
         category: input.category,

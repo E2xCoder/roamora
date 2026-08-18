@@ -141,11 +141,13 @@ function ClusterLayer({
   selectedIds,
   onPlaceClick,
   onPlaceDelete,
+  linkToDetail,
 }: {
   places: Place[];
   selectedIds: Set<string>;
   onPlaceClick?: (place: Place) => void;
   onPlaceDelete?: (id: string) => void;
+  linkToDetail?: boolean;
 }) {
   const map = useMap();
   const [version, setVersion] = useState(0);
@@ -227,7 +229,11 @@ function ClusterLayer({
           >
             {!onPlaceClick && (
               <Popup>
-                <PlacePopup place={place} onDelete={onPlaceDelete} />
+                <PlacePopup
+                  place={place}
+                  onDelete={onPlaceDelete}
+                  linkToDetail={linkToDetail}
+                />
               </Popup>
             )}
           </Marker>
@@ -240,9 +246,11 @@ function ClusterLayer({
 function PlacePopup({
   place,
   onDelete,
+  linkToDetail,
 }: {
   place: Place;
   onDelete?: (id: string) => void;
+  linkToDetail?: boolean;
 }) {
   return (
     <div className="min-w-[190px] max-w-[250px]">
@@ -269,12 +277,17 @@ function PlacePopup({
         <p className="text-xs mt-2 text-gray-600 line-clamp-3">{place.notes}</p>
       )}
       <div className="flex items-center gap-3 mt-2">
-        <a
-          href={`/place/${place.id}`}
-          className="text-xs font-semibold text-indigo-600 hover:text-indigo-800"
-        >
-          Detaya git →
-        </a>
+        {/* Only real database rows have a detail page. Explore renders search
+            results with synthetic ids (`wiki-3`, `poi-42`), and linking those
+            produced a "place not found" screen. */}
+        {linkToDetail && (
+          <a
+            href={`/place/${place.id}`}
+            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800"
+          >
+            Detaya git →
+          </a>
+        )}
         {onDelete && (
           <button
             onClick={() => onDelete(place.id)}
@@ -509,6 +522,11 @@ interface MapViewProps {
   onMapClick?: (lat: number, lng: number) => void;
   onPlaceDelete?: (id: string) => void;
   selectedCategory?: string;
+  /**
+   * Whether popups may link to /place/:id. Off by default because Explore
+   * renders API search results whose ids are synthetic and have no detail page.
+   */
+  linkToDetail?: boolean;
 
   /** Route mode: clicking a pin toggles it in the route instead of opening a popup. */
   routeMode?: boolean;
@@ -532,6 +550,7 @@ export default function MapView({
   onMapClick,
   onPlaceDelete,
   selectedCategory = "all",
+  linkToDetail = false,
   routeMode = false,
   routeStops = [],
   routeGeometry = null,
@@ -612,6 +631,7 @@ export default function MapView({
         selectedIds={selectedIds}
         onPlaceClick={routeMode ? onPlaceToggle : undefined}
         onPlaceDelete={onPlaceDelete}
+        linkToDetail={linkToDetail}
       />
 
       {routeStops.length > 0 && (

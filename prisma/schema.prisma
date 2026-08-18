@@ -66,6 +66,10 @@ model Place {
   slug String?
 
   name String
+  /// Lowercased, diacritic-stripped copy of `name`.
+  /// SQLite has no unaccent function, so "poznan" could never match "Poznań"
+  /// and searches for accented places silently returned fewer results.
+  nameNormalized String @default("")
   lat  Float
   lng  Float
 
@@ -137,6 +141,7 @@ model Place {
 
   /// Bounding-box lookups for the map.
   @@index([lat, lng])
+  @@index([nameNormalized])
   @@index([city])
   @@index([sourceType])
   @@index([categoryId])

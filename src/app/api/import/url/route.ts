@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { ingestUrl } from "@/server/services/ingestion";
 import { attachSourceToPlace } from "@/server/services/dedup";
-import { legacyCategoryToId } from "@/lib/taxonomy";
+import { legacyCategoryToId, normalizeForSearch } from "@/lib/taxonomy";
 import { importUrlSchema } from "@/server/schemas";
 import { apiError, parseBody, serverError } from "@/server/api-utils";
 
@@ -128,6 +128,7 @@ export async function PUT(request: Request) {
     const place = await prisma.place.create({
       data: {
         name: input.name,
+        nameNormalized: normalizeForSearch(input.name),
         lat: input.lat,
         lng: input.lng,
         category: input.category,

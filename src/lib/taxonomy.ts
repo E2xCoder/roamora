@@ -107,6 +107,28 @@ export function legacyCategoryToId(input: string | null | undefined): string {
   return LEGACY_MAP[key] ?? "other";
 }
 
+/**
+ * Search-normalised form of a place name: lowercase, diacritics removed.
+ *
+ * SQLite offers no unaccent function, so this is precomputed into a column.
+ * Without it, typing "poznan" missed every "Poznań" and a search for accented
+ * places quietly returned a fraction of the matches.
+ */
+export function normalizeForSearch(input: string): string {
+  return input
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    // Polish ł and similar do not decompose, so map them explicitly.
+    .replace(/ł/g, "l")
+    .replace(/đ/g, "d")
+    .replace(/ø/g, "o")
+    .replace(/æ/g, "ae")
+    .replace(/ß/g, "ss")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /** Provenance vocabularies (spec §11, §33). */
 export const SOURCE_TYPES = [
   "PERSONAL",

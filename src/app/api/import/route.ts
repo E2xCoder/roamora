@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { parseGoogleTakeout, parseGoogleCsv, geocodePlaces } from "@/lib/google-import";
+import { legacyCategoryToId, normalizeForSearch } from "@/lib/taxonomy";
 
 export const maxDuration = 300;
 
@@ -24,9 +25,12 @@ export async function POST(request: Request) {
       await prisma.place.createMany({
         data: geocoded.map((p) => ({
           name: p.name,
+          nameNormalized: normalizeForSearch(p.name),
           lat: p.lat,
           lng: p.lng,
           category: p.category,
+          categoryId: legacyCategoryToId(p.category),
+          sourceType: "IMPORTED",
           tags: JSON.stringify(p.tags),
           notes: p.notes,
           source: "google",
@@ -49,9 +53,12 @@ export async function POST(request: Request) {
     const created = await prisma.place.createMany({
       data: places.map((p) => ({
         name: p.name,
+        nameNormalized: normalizeForSearch(p.name),
         lat: p.lat,
         lng: p.lng,
         category: p.category,
+        categoryId: legacyCategoryToId(p.category),
+        sourceType: "IMPORTED",
         tags: JSON.stringify(p.tags),
         notes: p.notes,
         source: "google",
@@ -66,3 +73,6 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ error: "Unknown source" }, { status: 400 });
 }
+
+
+

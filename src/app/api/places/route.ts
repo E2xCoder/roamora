@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { legacyCategoryToId } from "@/lib/taxonomy";
+import { legacyCategoryToId, normalizeForSearch } from "@/lib/taxonomy";
 import {
   createPlaceSchema,
   placeQuerySchema,
@@ -37,7 +37,8 @@ export async function GET(request: Request) {
     if (q.category && q.category !== "all") {
       where.categoryId = legacyCategoryToId(q.category);
     }
-    if (q.search) where.name = { contains: q.search };
+    // Search the diacritic-stripped column so "poznan" matches "Poznań".
+    if (q.search) where.nameNormalized = { contains: normalizeForSearch(q.search) };
     if (q.city) where.city = q.city;
 
     // Bounding box — only applied when all four edges are present.
@@ -98,6 +99,7 @@ export async function POST(request: Request) {
     const place = await prisma.place.create({
       data: {
         name: input.name,
+        nameNormalized: normalizeForSearch(input.name),
         lat: input.lat,
         lng: input.lng,
         category: input.category,

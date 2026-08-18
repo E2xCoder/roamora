@@ -7,6 +7,7 @@ import {
   SOURCE_TYPES,
   LOCATION_SOURCES,
   AUTO_SAVE_CONFIDENCE,
+  normalizeForSearch,
 } from "@/lib/taxonomy";
 
 describe("taxonomy", () => {
@@ -89,6 +90,34 @@ describe("taxonomy", () => {
       expect(LOCATION_SOURCES).toContain("GEOCODER");
       expect(LOCATION_SOURCES).toContain("AI");
       expect(LOCATION_SOURCES).toContain("MANUAL");
+    });
+  });
+
+  describe("normalizeForSearch", () => {
+    it("strips diacritics so accented places are findable", () => {
+      // Regression: SQLite cannot unaccent, so "poznan" matched none of the
+      // six "Poznań" rows and searching for accented places silently
+      // returned a fraction of the results.
+      expect(normalizeForSearch("Poznań")).toBe("poznan");
+      expect(normalizeForSearch("Mürren")).toBe("murren");
+      expect(normalizeForSearch("Füssen")).toBe("fussen");
+      expect(normalizeForSearch("Engstligenfälle")).toBe("engstligenfalle");
+    });
+
+    it("handles letters that do not decompose", () => {
+      expect(normalizeForSearch("Łódź")).toBe("lodz");
+      expect(normalizeForSearch("Ærø")).toBe("aero");
+      expect(normalizeForSearch("Straße")).toBe("strasse");
+    });
+
+    it("lowercases and collapses whitespace", () => {
+      expect(normalizeForSearch("  Old   Town  Square ")).toBe("old town square");
+    });
+
+    it("makes a query a substring of the stored value", () => {
+      expect(normalizeForSearch("Poznań Information Centre")).toContain(
+        normalizeForSearch("poznan")
+      );
     });
   });
 

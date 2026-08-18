@@ -12,10 +12,10 @@ import {
   type Place,
   type UserPosition,
 } from "@/lib/place-meta";
-import { CATEGORIES } from "@/types";
+import { CATEGORIES as TAXONOMY } from "@/lib/taxonomy";
 import {
   MapPin, Search, ChevronUp, ChevronDown, X, Route as RouteIcon,
-  Crosshair, Check,
+  Crosshair, Check, Loader2, ImageIcon,
 } from "lucide-react";
 
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
@@ -36,6 +36,16 @@ export default function HomePage() {
   /** Personal saves vs. the bulk reference corpus — never mixed silently. */
   const [pool, setPool] = useState<"personal" | "reference">("personal");
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  /** True totals from SQL, not counts of the loaded page. */
+  const [stats, setStats] = useState<{ total: number; counts: Record<string, number> }>({
+    total: 0,
+    counts: {},
+  });
+  /** Whether more rows matched than the map could load. */
+  const [truncated, setTruncated] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichResult, setEnrichResult] = useState<string | null>(null);
 
   // --- route state ---
   const [routeMode, setRouteMode] = useState(false);
@@ -55,27 +65,62 @@ export default function HomePage() {
 
   const listRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * Search and category filtering happen in SQL.
+   *
+   * They used to run in the browser over whatever page had been loaded, so
+   * with 2000 rows fetched out of 9320 a search for "Poznań" matched nothing
+   * and the chips read "Tumu (2000)".
+   */
+  const buildQuery = useCallback(
+    (extra: Record<string, string> = {}) => {
+      const params = new URLSearchParams({ pool, limit: "2000", ...extra });
+      const q = searchQuery.trim();
+      if (q) params.set("search", q);
+      if (selectedCategory !== "all") params.set("category", selectedCategory);
+      return params.toString();
+    },
+    [pool, searchQuery, selectedCategory]
+  );
+
   const loadPlaces = useCallback(async () => {
     setLoadError(null);
+    setLoading(true);
     try {
-      const res = await fetch(`/api/places?pool=${pool}&limit=2000`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        setLoadError(body?.error ?? `Yerler yüklenemedi (${res.status})`);
+      const [placesRes, statsRes] = await Promise.all([
+        fetch(`/api/places?${buildQuery()}`),
+        // Stats ignore the category filter so every chip keeps its own total.
+        fetch(
+          `/api/places/stats?${new URLSearchParams({
+            pool,
+            ...(searchQuery.trim() ? { search: searchQuery.trim() } : {}),
+          })}`
+        ),
+      ]);
+
+      if (!placesRes.ok) {
+        const body = await placesRes.json().catch(() => null);
+        setLoadError(body?.error ?? `Yerler yüklenemedi (${placesRes.status})`);
         return;
       }
-      const data = await res.json();
-      setPlaces(data.places ?? []);
-    } catch (err) {
-      setLoadError(
-        err instanceof Error ? err.message : "Sunucuya ulaşılamadı"
-      );
-    }
-  }, [pool]);
 
+      const data = await placesRes.json();
+      setPlaces(data.places ?? []);
+      setTruncated(Boolean(data.hasMore));
+
+      if (statsRes.ok) setStats(await statsRes.json());
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
+    } finally {
+      setLoading(false);
+    }
+  }, [buildQuery, pool, searchQuery]);
+
+  // Debounced so typing does not fire a query per keystroke.
   useEffect(() => {
-    loadPlaces();
-  }, [loadPlaces]);
+    const timer = setTimeout(loadPlaces, searchQuery ? 350 : 0);
+    return () => clearTimeout(timer);
+  }, [loadPlaces, searchQuery]);
 
   /* ------------------------------ route fetching ----------------------------- */
 
@@ -195,31 +240,51 @@ export default function HomePage() {
     loadPlaces();
   }
 
+  /**
+   * Photo backfill runs on demand, in batches, rather than on page load — a
+   * free community API should not be hit implicitly (spec §8).
+   */
+  async function enrichPhotos() {
+    setEnriching(true);
+    setEnrichResult(null);
+    try {
+      const res = await fetch("/api/places/enrich", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 20, pool }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setEnrichResult(body?.error ?? "Görseller alınamadı");
+        return;
+      }
+      const data = await res.json();
+      setEnrichResult(
+        data.unavailable > 0
+          ? `${data.found} bulundu · Wikipedia yanıt vermiyor, sonra tekrar dene`
+          : `${data.found}/${data.attempted} görsel bulundu · ${data.remaining} yer kaldı`
+      );
+      loadPlaces();
+    } catch (err) {
+      setEnrichResult(
+        err instanceof Error ? err.message : "Sunucuya ulaşılamadı"
+      );
+    } finally {
+      setEnriching(false);
+    }
+  }
+
   /* --------------------------------- derived -------------------------------- */
 
-  const filteredPlaces = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return places.filter((p) => {
-      const catMatch = selectedCategory === "all" || p.category === selectedCategory;
-      const searchMatch = !q || p.name.toLowerCase().includes(q);
-      return catMatch && searchMatch;
-    });
-  }, [places, selectedCategory, searchQuery]);
-
-  const categoryCounts = useMemo(
-    () =>
-      places.reduce<Record<string, number>>((acc, p) => {
-        acc[p.category] = (acc[p.category] || 0) + 1;
-        return acc;
-      }, {}),
-    [places]
-  );
+  // The server already applied the search and category filter.
+  const filteredPlaces = places;
+  const categoryCounts = stats.counts;
 
   // Reset the incremental list when the filter changes.
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
     listRef.current?.scrollTo({ top: 0 });
-  }, [selectedCategory, searchQuery]);
+  }, [selectedCategory, searchQuery, pool]);
 
   function handleListScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget;
@@ -237,6 +302,7 @@ export default function HomePage() {
         selectedCategory={selectedCategory}
         onMapClick={routeMode ? undefined : (lat, lng) => setClickedPos({ lat, lng })}
         onPlaceDelete={handleDelete}
+        linkToDetail
         routeMode={routeMode}
         routeStops={stops}
         routeGeometry={geometry}
@@ -336,24 +402,22 @@ export default function HomePage() {
                 : "glass-panel text-foreground hover:shadow-[var(--shadow-md)]"
             }`}
           >
-            Tumu {places.length > 0 && `(${places.length})`}
+            Tümü {stats.total > 0 && `(${stats.total})`}
           </button>
-          {CATEGORIES.map((c) =>
-            categoryCounts[c] ? (
-              <button
-                key={c}
-                onClick={() => setSelectedCategory(c)}
-                className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-medium shadow-[var(--shadow-sm)] transition-all flex items-center gap-1.5 ${
-                  selectedCategory === c
-                    ? "gradient-primary text-white shadow-[var(--shadow-md)]"
-                    : "glass-panel text-foreground hover:shadow-[var(--shadow-md)]"
-                }`}
-              >
-                <span>{CATEGORY_EMOJI[c] || "📍"}</span>
-                {c} ({categoryCounts[c]})
-              </button>
-            ) : null
-          )}
+          {TAXONOMY.filter((c) => categoryCounts[c.id]).map((c) => (
+            <button
+              key={c.id}
+              onClick={() => setSelectedCategory(c.id)}
+              className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-medium shadow-[var(--shadow-sm)] transition-all flex items-center gap-1.5 ${
+                selectedCategory === c.id
+                  ? "gradient-primary text-white shadow-[var(--shadow-md)]"
+                  : "glass-panel text-foreground hover:shadow-[var(--shadow-md)]"
+              }`}
+            >
+              <span>{c.icon}</span>
+              {c.label} ({categoryCounts[c.id]})
+            </button>
+          ))}
         </div>
       </div>
 
@@ -412,6 +476,33 @@ export default function HomePage() {
             >
               {panelView === "places" && (
                 <div className="p-4 space-y-3">
+                  {/* Photo backfill — only offered when photos are missing */}
+                  {!loading &&
+                    filteredPlaces.length > 0 &&
+                    filteredPlaces.some((p) => !p.imageUrl) && (
+                      <div className="flex items-center gap-2.5 p-3 bg-surface rounded-2xl">
+                        <ImageIcon size={14} className="text-muted shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] font-medium">
+                            {enrichResult ?? "Bazı yerlerin görseli yok"}
+                          </p>
+                          <p className="text-[10px] text-muted">
+                            Wikipedia&apos;dan 20&apos;şer çekilir
+                          </p>
+                        </div>
+                        <button
+                          onClick={enrichPhotos}
+                          disabled={enriching}
+                          className="shrink-0 px-3 py-1.5 gradient-primary text-white rounded-lg text-[10px] font-bold disabled:opacity-40 flex items-center gap-1.5"
+                        >
+                          {enriching && (
+                            <Loader2 size={10} className="animate-spin" />
+                          )}
+                          {enriching ? "Çekiliyor" : "Görsel çek"}
+                        </button>
+                      </div>
+                    )}
+
                   {loadError ? (
                     <div className="text-center py-12">
                       <div className="w-16 h-16 rounded-3xl bg-danger/10 flex items-center justify-center mx-auto mb-4">
@@ -426,26 +517,53 @@ export default function HomePage() {
                         Tekrar dene
                       </button>
                     </div>
+                  ) : loading ? (
+                    <div className="text-center py-12">
+                      <Loader2 size={20} className="animate-spin text-primary mx-auto" />
+                    </div>
                   ) : filteredPlaces.length === 0 ? (
                     <div className="text-center py-12">
                       <div className="w-16 h-16 rounded-3xl bg-primary-light flex items-center justify-center mx-auto mb-4">
-                        <MapPin size={24} className="text-primary" />
+                        {searchQuery ? (
+                          <Search size={24} className="text-primary" />
+                        ) : (
+                          <MapPin size={24} className="text-primary" />
+                        )}
                       </div>
-                      {pool === "personal" ? (
+                      {searchQuery ? (
+                        <>
+                          <p className="font-medium text-sm">
+                            &ldquo;{searchQuery}&rdquo; için sonuç yok
+                          </p>
+                          <p className="text-xs text-muted mt-1">
+                            {pool === "personal"
+                              ? "Keşif havuzunda aramayı dene"
+                              : "Farklı bir yazım dene"}
+                          </p>
+                          {pool === "personal" && (
+                            <button
+                              onClick={() => setPool("reference")}
+                              className="mt-3 px-4 py-2 bg-surface border border-card-border rounded-xl text-xs font-medium hover:bg-card-hover"
+                            >
+                              Keşif havuzunda ara
+                            </button>
+                          )}
+                        </>
+                      ) : pool === "personal" ? (
                         <>
                           <p className="font-medium text-sm">
                             Henüz kaydettiğin yer yok
                           </p>
                           <p className="text-xs text-muted mt-1">
-                            Link sekmesinden TikTok/Instagram linki yapıştır,
-                            ya da yukarıdan keşif havuzuna geç
+                            Link sekmesinden bir bağlantı yapıştır, ya da
+                            yukarıdan keşif havuzuna geç
                           </p>
                         </>
                       ) : (
                         <>
                           <p className="font-medium text-sm">Sonuç yok</p>
                           <p className="text-xs text-muted mt-1">
-                            Filtreyi veya aramayı değiştir
+                            Filtreyi değiştir
                           </p>
                         </>
                       )}
@@ -482,6 +600,13 @@ export default function HomePage() {
                       {visibleCount < filteredPlaces.length && (
                         <p className="text-center text-[11px] text-muted py-3">
                           {filteredPlaces.length - visibleCount} yer daha…
+                        </p>
+                      )}
+                      {truncated && visibleCount >= filteredPlaces.length && (
+                        <p className="text-center text-[11px] text-muted py-3">
+                          {stats.total.toLocaleString("tr-TR")} sonuçtan ilk{" "}
+                          {filteredPlaces.length.toLocaleString("tr-TR")} tanesi
+                          — daraltmak için ara veya kategori seç
                         </p>
                       )}
                     </>

@@ -13,9 +13,17 @@ interface WaymarkedTrail {
 }
 
 interface TrailSearchResult {
-  results: WaymarkedTrail[];
-  total: number;
+  results?: WaymarkedTrail[];
+  total?: number;
 }
+
+/** Waymarked's network codes, which are meaningless on their own. */
+const GROUP_LABELS: Record<string, string> = {
+  INT: "Uluslararası",
+  NAT: "Ulusal",
+  REG: "Bölgesel",
+  LOC: "Yerel",
+};
 
 const POPULAR_TRAILS = [
   { name: "Jakobsweg", emoji: "🇩🇪" },
@@ -47,8 +55,11 @@ export default function HikingPage() {
       `/api/hiking?source=waymarked&q=${encodeURIComponent(q)}`
     );
     const data: TrailSearchResult = await res.json();
-    setTrails(data.results || []);
-    setTotal(data.total || 0);
+    const results = data.results ?? [];
+    setTrails(results);
+    // Waymarked omits `total` on some responses; falling back to 0 produced
+    // "0 sonuc bulundu" printed directly above a list of results.
+    setTotal(typeof data.total === "number" ? data.total : results.length);
     setLoading(false);
   }
 
@@ -127,9 +138,13 @@ export default function HikingPage() {
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex-1 min-w-0">
-                  <h3 className="font-bold text-sm leading-tight">{trail.name || "Unnamed Trail"}</h3>
+                  <h3 className="font-bold text-sm leading-tight">
+                    {trail.name || "İsimsiz rota"}
+                  </h3>
                   {trail.group && (
-                    <p className="text-xs text-muted mt-1">{trail.group}</p>
+                    <p className="text-xs text-muted mt-1">
+                      {GROUP_LABELS[trail.group] ?? trail.group}
+                    </p>
                   )}
                 </div>
                 <a
@@ -143,10 +158,20 @@ export default function HikingPage() {
               </div>
 
               <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface rounded-xl">
-                  <MapPin size={12} className="text-primary" />
-                  <span className="text-xs font-medium">{formatDistance(trail.mapped_length)}</span>
-                </div>
+                {trail.mapped_length > 0 ? (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface rounded-xl">
+                    <MapPin size={12} className="text-primary" />
+                    <span className="text-xs font-medium">
+                      {formatDistance(trail.mapped_length)}
+                    </span>
+                  </div>
+                ) : (
+                  // Waymarked's search endpoint omits lengths; say so rather
+                  // than showing a bare dash that reads like a zero.
+                  <span className="text-[11px] text-muted">
+                    Uzunluk bu listede yok — detayda görebilirsin
+                  </span>
+                )}
                 {trail.official_length > 0 && (
                   <div className="text-xs text-muted">
                     Resmi: {formatDistance(trail.official_length)}

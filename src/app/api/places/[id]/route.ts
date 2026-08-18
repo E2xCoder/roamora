@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { legacyCategoryToId } from "@/lib/taxonomy";
+import { legacyCategoryToId, normalizeForSearch } from "@/lib/taxonomy";
 import { updatePlaceSchema } from "@/server/schemas";
 import { apiError, parseBody, serverError } from "@/server/api-utils";
 import { bboxAround } from "@/server/services/geocode";
@@ -95,6 +95,10 @@ export async function PATCH(
       } else {
         data[key] = value;
       }
+    }
+    // Keep the search column in step with a renamed place.
+    if (typeof input.name === "string") {
+      data.nameNormalized = normalizeForSearch(input.name);
     }
     if (input.category && !input.categoryId) {
       data.categoryId = legacyCategoryToId(input.category);

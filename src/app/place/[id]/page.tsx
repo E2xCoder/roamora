@@ -387,6 +387,7 @@ export default function PlaceDetailPage() {
             places={[place, ...place.nearby]}
             center={[place.lat, place.lng]}
             zoom={15}
+            linkToDetail
           />
         </section>
 
