@@ -378,8 +378,15 @@ function LiveLocation({
 }) {
   const map = useMap();
   const [pos, setPos] = useState<UserPosition | null>(null);
+
+  // `follow` is read inside the geolocation callback, which must not be torn
+  // down and re-subscribed every time the flag flips — losing the watch would
+  // drop GPS continuity mid-walk. Mirroring it into a ref keeps the callback
+  // stable; the write belongs in an effect, not in the render body.
   const followRef = useRef(follow);
-  followRef.current = follow;
+  useEffect(() => {
+    followRef.current = follow;
+  }, [follow]);
 
   useEffect(() => {
     if (!enabled || !("geolocation" in navigator)) {

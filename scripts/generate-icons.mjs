@@ -1,6 +1,9 @@
-const fs = require("fs");
-const path = require("path");
-const sharp = require("sharp");
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import sharp from "sharp";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function createSVG(size) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">

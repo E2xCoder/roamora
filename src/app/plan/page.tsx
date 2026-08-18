@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { CalendarDays, Plus, Trash2, Loader2, Clock, ChevronRight, Sparkles } from "lucide-react";
+import { CalendarDays, Plus, Trash2, Loader2, Clock, ChevronRight, Sparkles, AlertCircle } from "lucide-react";
 import { TRIP_PREFERENCES } from "@/types";
 
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
@@ -40,45 +40,64 @@ export default function PlanPage() {
   const [selectedDay, setSelectedDay] = useState<number>(1);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [destination, setDestination] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [preferences, setPreferences] = useState<string[]>([]);
 
-  useEffect(() => {
-    loadTrips();
-  }, []);
-
-  async function loadTrips() {
+  const loadTrips = useCallback(async () => {
     try {
       const res = await fetch("/api/trips");
-      if (!res.ok) return;
-      const data = await res.json();
-      setTrips(data);
-    } catch {
-      // ignore
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setError(body?.error ?? `Planlar yüklenemedi (${res.status})`);
+        return;
+      }
+      setTrips(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    loadTrips();
+  }, [loadTrips]);
 
   async function createTrip(e: React.FormEvent) {
     e.preventDefault();
     if (!destination || !startDate || !endDate) return;
     setLoading(true);
-    const res = await fetch("/api/trips", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destination, startDate, endDate, preferences }),
-    });
-    const trip = await res.json();
-    setTrips([trip, ...trips]);
-    setSelectedTrip(trip);
-    setCreating(false);
-    setLoading(false);
-    setDestination("");
-    setStartDate("");
-    setEndDate("");
-    setPreferences([]);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/trips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ destination, startDate, endDate, preferences }),
+      });
+
+      const body = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        // Surface the real reason — missing places, unreachable model, etc.
+        setError(body?.error ?? `Plan oluşturulamadı (${res.status})`);
+        return;
+      }
+
+      setTrips([body, ...trips]);
+      setSelectedTrip(body);
+      setCreating(false);
+      setDestination("");
+      setStartDate("");
+      setEndDate("");
+      setPreferences([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function deleteTrip(id: string) {
@@ -190,6 +209,18 @@ export default function PlanPage() {
                 ))}
               </div>
             </div>
+
+            {error && (
+              <div className="flex items-start gap-3 p-4 rounded-2xl bg-danger/10 border border-danger/20">
+                <AlertCircle size={16} className="text-danger shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-danger">
+                    Plan oluşturulamadı
+                  </p>
+                  <p className="text-xs text-muted mt-0.5">{error}</p>
+                </div>
+              </div>
+            )}
 
             <button
               type="submit"

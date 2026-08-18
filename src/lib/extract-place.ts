@@ -62,7 +62,7 @@ export async function extractFromUrl(url: string): Promise<ExtractedPlace> {
       const thumbName = `${info.id || Date.now()}.jpg`;
       const thumbPath = path.join(thumbDir, thumbName);
 
-      const { stdout: thumbResult } = await execAsync(
+      await execAsync(
         `yt-dlp --write-thumbnail --skip-download --convert-thumbnails jpg -o "${thumbPath.replace('.jpg', '')}" "${url}"`,
         { timeout: 15000 }
       );

@@ -1,13 +1,9 @@
 import { NextResponse } from "next/server";
+import { osrmHostFor } from "@/server/config";
+import { routeRequestSchema } from "@/server/schemas";
+import { parseBody, serverError } from "@/server/api-utils";
 
 export const maxDuration = 30;
-
-// FOSSGIS public OSRM instances (free, no API key)
-const PROFILE_HOSTS: Record<string, string> = {
-  foot: "https://routing.openstreetmap.de/routed-foot",
-  bike: "https://routing.openstreetmap.de/routed-bike",
-  car: "https://routing.openstreetmap.de/routed-car",
-};
 
 interface Waypoint {
   lat: number;
@@ -54,27 +50,15 @@ function fallbackRoute(waypoints: Waypoint[], speedMs: number) {
 }
 
 export async function POST(request: Request) {
+  const parsed = await parseBody(request, routeRequestSchema);
+  if (!parsed.ok) return parsed.response;
+
+  const { waypoints, profile } = parsed.data;
+
   try {
-    const body = await request.json();
-    const waypoints: Waypoint[] = body.waypoints || [];
-    const profile: string = body.profile || "foot";
-
-    if (waypoints.length < 2) {
-      return NextResponse.json(
-        { error: "En az 2 nokta gerekli" },
-        { status: 400 }
-      );
-    }
-    if (waypoints.length > 25) {
-      return NextResponse.json(
-        { error: "En fazla 25 nokta" },
-        { status: 400 }
-      );
-    }
-
     // walking 1.4 m/s, cycling 4.2 m/s, driving 13.9 m/s
     const speedMs = profile === "bike" ? 4.2 : profile === "car" ? 13.9 : 1.4;
-    const host = PROFILE_HOSTS[profile] || PROFILE_HOSTS.foot;
+    const host = osrmHostFor(profile);
     const coords = waypoints.map((w) => `${w.lng},${w.lat}`).join(";");
     const url = `${host}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
 
@@ -106,11 +90,17 @@ export async function POST(request: Request) {
         fallback: false,
       });
     } catch (err) {
-      console.error("OSRM failed, using straight-line fallback:", err);
-      return NextResponse.json(fallbackRoute(waypoints, speedMs));
+      // Degrade explicitly: the client surfaces `fallback: true` as
+      // "routing unavailable, showing straight-line distance" rather than
+      // presenting the estimate as a real route (spec §62, §99).
+      console.error("[api] OSRM unavailable, straight-line fallback:", err);
+      return NextResponse.json({
+        ...fallbackRoute(waypoints, speedMs),
+        fallbackReason:
+          err instanceof Error ? err.message : "routing provider unavailable",
+      });
     }
   } catch (err) {
-    console.error("Route error:", err);
-    return NextResponse.json({ error: "Rota olusturulamadi" }, { status: 500 });
+    return serverError(err, "ROUTE_FAILED");
   }
 }

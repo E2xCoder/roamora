@@ -15,7 +15,23 @@ interface ExtractedData {
   lng?: number;
   category?: string;
   sourceUrl: string;
+  locationConfidence?: number;
+  locationSource?: string;
 }
+
+interface StageResult {
+  stage: string;
+  status: "ok" | "skipped" | "failed";
+  detail?: string;
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  metadata: "Üstveri okunuyor",
+  media: "Görsel alınıyor",
+  "location-text": "Metinden yer aranıyor",
+  "location-ai": "AI ile yer çıkarımı",
+  geocode: "Koordinat bulunuyor",
+};
 
 interface ExtractPanelProps {
   onPlaceSaved: () => void;
@@ -30,11 +46,17 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
   const [editLat, setEditLat] = useState("");
   const [editLng, setEditLng] = useState("");
   const [saving, setSaving] = useState(false);
+  const [stages, setStages] = useState<StageResult[]>([]);
+  const [failure, setFailure] = useState<{ message: string; code: string } | null>(
+    null
+  );
 
   async function handleExtract() {
     if (!urlInput.trim()) return;
     setExtracting(true);
     setExtracted(null);
+    setStages([]);
+    setFailure(null);
 
     try {
       const res = await fetch("/api/extract", {
@@ -42,15 +64,30 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: urlInput.trim() }),
       });
-      if (!res.ok) throw new Error("Extract failed");
-      const data = await res.json();
-      setExtracted(data.extracted);
-      setEditName(data.extracted.placeName || data.extracted.title || "");
-      setEditCategory(data.extracted.category || "attraction");
-      setEditLat(data.extracted.lat?.toString() || "");
-      setEditLng(data.extracted.lng?.toString() || "");
-    } catch {
-      alert("Link'ten veri cekilemedi. URL'yi kontrol et.");
+
+      const body = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        // Name the stage that failed rather than showing a generic message.
+        setFailure({
+          message: body?.error ?? `İstek başarısız (${res.status})`,
+          code: body?.code ?? "UNKNOWN",
+        });
+        if (Array.isArray(body?.details)) setStages(body.details);
+        return;
+      }
+
+      setStages(body.stages ?? []);
+      setExtracted(body.extracted);
+      setEditName(body.extracted.placeName || body.extracted.title || "");
+      setEditCategory(body.extracted.category || "attraction");
+      setEditLat(body.extracted.lat?.toString() || "");
+      setEditLng(body.extracted.lng?.toString() || "");
+    } catch (err) {
+      setFailure({
+        message: err instanceof Error ? err.message : "Sunucuya ulaşılamadı",
+        code: "NETWORK",
+      });
     } finally {
       setExtracting(false);
     }
@@ -74,14 +111,29 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
           thumbnailPath: extracted?.thumbnailPath,
           thumbnailUrl: extracted?.thumbnailUrl,
           platform: extracted?.platform,
+          locationConfidence: extracted?.locationConfidence,
+          locationSource: extracted?.locationSource,
         }),
       });
-      if (!res.ok) throw new Error("Save failed");
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setFailure({
+          message: body?.error ?? `Kaydedilemedi (${res.status})`,
+          code: body?.code ?? "SAVE_FAILED",
+        });
+        return;
+      }
+
       setExtracted(null);
       setUrlInput("");
+      setStages([]);
       onPlaceSaved();
-    } catch {
-      alert("Kaydetme basarisiz.");
+    } catch (err) {
+      setFailure({
+        message: err instanceof Error ? err.message : "Sunucuya ulaşılamadı",
+        code: "NETWORK",
+      });
     } finally {
       setSaving(false);
     }
@@ -135,6 +187,52 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
           </div>
           <p className="text-sm font-medium">Icerik analiz ediliyor...</p>
           <p className="text-xs text-muted mt-1">yt-dlp + AI ile yer bilgisi cikariliyor</p>
+        </div>
+      )}
+
+      {/* Pipeline report — shown for both success and failure */}
+      {stages.length > 0 && !extracting && (
+        <div className="mb-4 rounded-2xl border border-card-border bg-surface p-3 space-y-1.5">
+          {stages.map((s, i) => (
+            <div key={`${s.stage}-${i}`} className="flex items-start gap-2">
+              <span className="mt-0.5 shrink-0">
+                {s.status === "ok" ? (
+                  <Check size={12} className="text-success" />
+                ) : s.status === "failed" ? (
+                  <X size={12} className="text-danger" />
+                ) : (
+                  <span className="block w-3 h-3 rounded-full border border-muted/40" />
+                )}
+              </span>
+              <div className="min-w-0">
+                <p className="text-[11px] font-medium leading-tight">
+                  {STAGE_LABELS[s.stage] ?? s.stage}
+                </p>
+                {s.detail && (
+                  <p className="text-[10px] text-muted leading-snug break-words">
+                    {s.detail}
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Failure — names the missing capability instead of a blank form */}
+      {failure && !extracting && (
+        <div className="mb-4 rounded-2xl border border-danger/20 bg-danger/10 p-4 animate-fade-in">
+          <div className="flex items-start gap-2.5">
+            <X size={14} className="text-danger shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-danger">
+                Bu bağlantı çözümlenemedi
+              </p>
+              <p className="text-xs text-muted mt-1 leading-relaxed">
+                {failure.message}
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
@@ -239,7 +337,7 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
       )}
 
       {/* Tips */}
-      {!extracted && !extracting && (
+      {!extracted && !extracting && !failure && stages.length === 0 && (
         <div className="space-y-2 mt-2">
           <div className="flex items-center gap-3 p-3 bg-surface rounded-xl">
             <span className="text-lg">🎵</span>

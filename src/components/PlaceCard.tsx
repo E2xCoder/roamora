@@ -1,6 +1,6 @@
 "use client";
 
-import { MapPin, Trash2, ExternalLink } from "lucide-react";
+import { Trash2 } from "lucide-react";
 
 interface Place {
   id: string;

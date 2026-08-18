@@ -15,7 +15,7 @@ import {
 import { CATEGORIES } from "@/types";
 import {
   MapPin, Search, ChevronUp, ChevronDown, X, Route as RouteIcon,
-  Sparkles, Crosshair, Check,
+  Crosshair, Check,
 } from "lucide-react";
 
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
@@ -33,6 +33,9 @@ export default function HomePage() {
   const [showPanel, setShowPanel] = useState(true);
   const [panelView, setPanelView] = useState<PanelView>("places");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  /** Personal saves vs. the bulk reference corpus — never mixed silently. */
+  const [pool, setPool] = useState<"personal" | "reference">("personal");
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // --- route state ---
   const [routeMode, setRouteMode] = useState(false);
@@ -53,15 +56,22 @@ export default function HomePage() {
   const listRef = useRef<HTMLDivElement>(null);
 
   const loadPlaces = useCallback(async () => {
+    setLoadError(null);
     try {
-      const res = await fetch("/api/places");
-      if (!res.ok) return;
+      const res = await fetch(`/api/places?pool=${pool}&limit=2000`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setLoadError(body?.error ?? `Yerler yüklenemedi (${res.status})`);
+        return;
+      }
       const data = await res.json();
-      setPlaces(data);
-    } catch {
-      // ignore
+      setPlaces(data.places ?? []);
+    } catch (err) {
+      setLoadError(
+        err instanceof Error ? err.message : "Sunucuya ulaşılamadı"
+      );
     }
-  }, []);
+  }, [pool]);
 
   useEffect(() => {
     loadPlaces();
@@ -299,6 +309,25 @@ export default function HomePage() {
       {/* Category chips */}
       <div className="absolute top-[76px] left-4 right-4 z-[1000]">
         <div className="flex gap-2 overflow-x-auto hide-scrollbar py-1">
+          {/* Knowledge pool: what I saved vs. the discovery corpus */}
+          <button
+            onClick={() =>
+              setPool((p) => (p === "personal" ? "reference" : "personal"))
+            }
+            className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-semibold shadow-[var(--shadow-sm)] transition-all flex items-center gap-1.5 ${
+              pool === "personal"
+                ? "gradient-cool text-white"
+                : "glass-panel text-foreground"
+            }`}
+            title={
+              pool === "personal"
+                ? "Kaydettiklerim gösteriliyor — keşif havuzuna geç"
+                : "Keşif havuzu (Wikivoyage) gösteriliyor — kendi yerlerime dön"
+            }
+          >
+            {pool === "personal" ? "★ Kaydettiklerim" : "🌍 Keşif havuzu"}
+          </button>
+
           <button
             onClick={() => setSelectedCategory("all")}
             className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-medium shadow-[var(--shadow-sm)] transition-all ${
@@ -383,15 +412,43 @@ export default function HomePage() {
             >
               {panelView === "places" && (
                 <div className="p-4 space-y-3">
-                  {filteredPlaces.length === 0 ? (
+                  {loadError ? (
+                    <div className="text-center py-12">
+                      <div className="w-16 h-16 rounded-3xl bg-danger/10 flex items-center justify-center mx-auto mb-4">
+                        <X size={24} className="text-danger" />
+                      </div>
+                      <p className="font-medium text-sm">Yerler yüklenemedi</p>
+                      <p className="text-xs text-muted mt-1">{loadError}</p>
+                      <button
+                        onClick={loadPlaces}
+                        className="mt-4 px-4 py-2 bg-surface border border-card-border rounded-xl text-xs font-medium hover:bg-card-hover"
+                      >
+                        Tekrar dene
+                      </button>
+                    </div>
+                  ) : filteredPlaces.length === 0 ? (
                     <div className="text-center py-12">
                       <div className="w-16 h-16 rounded-3xl bg-primary-light flex items-center justify-center mx-auto mb-4">
                         <MapPin size={24} className="text-primary" />
                       </div>
-                      <p className="font-medium text-sm">Henuz yer yok</p>
-                      <p className="text-xs text-muted mt-1">
-                        Link sekmesinden TikTok/Instagram linki yapistir
-                      </p>
+                      {pool === "personal" ? (
+                        <>
+                          <p className="font-medium text-sm">
+                            Henüz kaydettiğin yer yok
+                          </p>
+                          <p className="text-xs text-muted mt-1">
+                            Link sekmesinden TikTok/Instagram linki yapıştır,
+                            ya da yukarıdan keşif havuzuna geç
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="font-medium text-sm">Sonuç yok</p>
+                          <p className="text-xs text-muted mt-1">
+                            Filtreyi veya aramayı değiştir
+                          </p>
+                        </>
+                      )}
                     </div>
                   ) : (
                     <>

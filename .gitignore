@@ -32,6 +32,13 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the documented template must be committed.
+!.env.example
+
+# local database backups taken before migrations
+.backups/
+# local media storage
+/storage/
 
 # vercel
 .vercel

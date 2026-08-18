@@ -1,3 +1,13 @@
+// Roamora schema.
+//
+// SQLite has no native enum type, so enum-like columns are Strings with their
+// permitted values documented above each field. Values are enforced in the
+// application layer by the zod schemas in src/server/schemas.
+//
+// Phase 1 keeps every column the existing UI reads (Place.category,
+// Place.tags, Place.source, Trip/TripDay/TripActivity) so nothing breaks
+// while the normalized structures are introduced alongside them.
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -6,36 +16,276 @@ datasource db {
   provider = "sqlite"
 }
 
-model Place {
-  id          String   @id @default(cuid())
-  name        String
-  lat         Float
-  lng         Float
-  category    String   @default("other")
-  tags        String   @default("[]")
-  notes       String   @default("")
-  source      String   @default("manual")
-  imageUrl    String?
-  address     String?
-  rating      Float?
-  isHiddenGem Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+// ---------------------------------------------------------------- IDENTITY
 
-  activities TripActivity[]
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  places    Place[]
+  trips     Trip[]
+  visits    Visit[]
+  gpsTracks GpsTrack[]
 }
+
+// ---------------------------------------------------------------- TAXONOMY
+
+model Category {
+  id     String  @id
+  label  String
+  icon   String  @default("📍")
+  color  String  @default("#78716c")
+  /// Ordering hint for UI lists.
+  sort   Int     @default(0)
+  places Place[]
+}
+
+model Tag {
+  id     String     @id @default(cuid())
+  name   String     @unique
+  places PlaceTag[]
+}
+
+model PlaceTag {
+  placeId String
+  tagId   String
+
+  place Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  tag   Tag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([placeId, tagId])
+  @@index([tagId])
+}
+
+// ------------------------------------------------------------------- PLACE
+
+model Place {
+  id   String  @id @default(cuid())
+  slug String?
+
+  name String
+  lat  Float
+  lng  Float
+
+  // --- geography ---------------------------------------------------------
+  address     String?
+  city        String?
+  region      String?
+  country     String?
+  countryCode String?
+
+  // --- classification ----------------------------------------------------
+  /// Legacy free-text category, still read by the current UI. Phase 2 migrates
+  /// readers to `categoryId` and this becomes derived.
+  category                 String  @default("other")
+  categoryId               String?
+  subcategory              String?
+  classificationConfidence Float?
+
+  // --- provenance --------------------------------------------------------
+  /// PERSONAL | RESEARCHED | IMPORTED | MANUAL | DISCOVERED | REFERENCE
+  sourceType String @default("MANUAL")
+  /// Legacy origin label (wikivoyage, google, tiktok, manual, ...).
+  source     String @default("manual")
+  /// EXPLICIT_COORDINATE | PLATFORM_METADATA | URL | TEXT | OCR | AI | GEOCODER | MANUAL
+  locationSource     String?
+  locationConfidence Float?
+
+  // --- scoring (0-100, heuristic) ---------------------------------------
+  hiddenGemScore   Int?
+  touristTrapScore Int?
+  localValueScore  Int?
+
+  // --- planning inputs ---------------------------------------------------
+  estimatedVisitMinutes Int?
+  estimatedCost         Float?
+  currency              String?
+  /// OSM-style opening_hours string.
+  openingHours          String?
+  website               String?
+  phone                 String?
+
+  // --- content -----------------------------------------------------------
+  notes         String  @default("")
+  aiDescription String?
+  /// Legacy single image. Media[] is the structured replacement.
+  imageUrl      String?
+  /// Legacy JSON array of tag strings; PlaceTag is the structured replacement.
+  tags          String  @default("[]")
+  /// Legacy flag, superseded by hiddenGemScore.
+  isHiddenGem   Boolean @default(false)
+  rating        Float?
+
+  // --- lifecycle ---------------------------------------------------------
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  userId String?
+
+  user        User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  categoryRef Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  sources     PlaceSource[]
+  media       Media[]
+  placeTags   PlaceTag[]
+  provenance  FieldProvenance[]
+  visits      Visit[]
+  activities  TripActivity[]
+  bucketItems BucketListItem[]
+
+  /// Bounding-box lookups for the map.
+  @@index([lat, lng])
+  @@index([city])
+  @@index([sourceType])
+  @@index([categoryId])
+  @@index([deletedAt])
+}
+
+/// Why a place was saved. One canonical place may have many origins — the same
+/// viewpoint discovered via TikTok, Instagram and a blog stays one Place with
+/// three PlaceSource rows.
+model PlaceSource {
+  id      String @id @default(cuid())
+  placeId String
+
+  /// tiktok | instagram | youtube | komoot | googlemaps | web | manual | wikivoyage | google-takeout
+  platform    String
+  url         String?
+  title       String?
+  creator     String?
+  description String?
+  publishedAt DateTime?
+  savedAt     DateTime  @default(now())
+  thumbnailUrl String?
+  /// Platform-native id (video id, place id) used for deduplication.
+  externalId  String?
+  /// Raw provider payload as JSON, for reprocessing without refetching.
+  metadata    String?
+  /// Hash of the fetched content, to detect duplicates and changes.
+  contentHash String?
+
+  place Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  media Media[]
+
+  @@index([placeId])
+  @@index([platform, externalId])
+  @@index([url])
+}
+
+/// Binary media lives on disk (StorageProvider); only metadata is stored here.
+model Media {
+  id       String  @id @default(cuid())
+  placeId  String?
+  sourceId String?
+
+  /// image | video | thumbnail | screenshot
+  type          String
+  storagePath   String?
+  originalUrl   String?
+  thumbnailPath String?
+  mimeType      String?
+  sizeBytes     Int?
+  durationSec   Float?
+  width         Int?
+  height        Int?
+  hash          String?
+  createdAt     DateTime @default(now())
+
+  place  Place?       @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  source PlaceSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  @@index([placeId])
+  @@index([sourceId])
+  @@index([hash])
+}
+
+/// Per-field origin and confidence, so the UI can explain where a value came
+/// from and so manual corrections are never overwritten by later AI guesses.
+model FieldProvenance {
+  id      String @id @default(cuid())
+  placeId String
+
+  field      String
+  /// Same vocabulary as Place.locationSource, plus `PROVIDER`.
+  source     String
+  confidence Float?
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  place Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([placeId, field])
+  @@index([placeId])
+}
+
+// -------------------------------------------------------------------- TRIP
 
 model Trip {
   id          String   @id @default(cuid())
   destination String
   startDate   String
   endDate     String
+  /// Legacy JSON array of preference strings; TripPreference is the
+  /// structured replacement introduced in phase 4.
   preferences String   @default("[]")
   status      String   @default("draft")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  days TripDay[]
+  userId String?
+
+  user       User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  days       TripDay[]
+  preference TripPreference?
+  bucketList BucketListItem[]
+  visits     Visit[]
+  gpsTracks  GpsTrack[]
+
+  @@index([userId])
+}
+
+/// Optimizer inputs for a trip.
+model TripPreference {
+  id     String @id @default(cuid())
+  tripId String @unique
+
+  /// "HH:MM"
+  dailyStartTime     String  @default("09:00")
+  dailyEndTime       String  @default("20:00")
+  /// foot | bike | car
+  travelMode         String  @default("foot")
+  maxWalkingMeters   Int?
+  maxDailyMeters     Int?
+  budget             Float?
+  currency           String?
+  /// maximum_experience | least_walking | relaxed
+  pace               String  @default("maximum_experience")
+  /// JSON object of category weights, e.g. {"food":2,"museum":1}
+  categoryWeights    String  @default("{}")
+  startLat           Float?
+  startLng           Float?
+  endLat             Float?
+  endLng             Float?
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+}
+
+/// Places staged for a trip before an itinerary exists.
+model BucketListItem {
+  id      String @id @default(cuid())
+  placeId String
+  tripId  String?
+  /// Higher wins when the optimizer must drop stops.
+  priority Int      @default(0)
+  addedAt  DateTime @default(now())
+
+  place Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  trip  Trip? @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@unique([placeId, tripId])
+  @@index([tripId])
 }
 
 model TripDay {
@@ -46,6 +296,8 @@ model TripDay {
 
   trip       Trip           @relation(fields: [tripId], references: [id], onDelete: Cascade)
   activities TripActivity[]
+
+  @@index([tripId])
 }
 
 model TripActivity {
@@ -59,20 +311,119 @@ model TripActivity {
   order     Int
   notes     String  @default("")
 
+  // --- planner output (phase 4) -----------------------------------------
+  arrivalTime      String?
+  departureTime    String?
+  travelSeconds    Int?
+  travelMeters     Int?
+  /// foot | bike | car
+  travelMode       String?
+  /// Optimizer must preserve this stop's position when regenerating.
+  locked           Boolean @default(false)
+  /// Human-readable justification for this stop's placement.
+  inclusionReason  String?
+
   tripDay TripDay @relation(fields: [tripDayId], references: [id], onDelete: Cascade)
   place   Place?  @relation(fields: [placeId], references: [id], onDelete: SetNull)
+
+  @@index([tripDayId])
+  @@index([placeId])
 }
 
-model HikingTrail {
-  id            String  @id @default(cuid())
-  osmId         String  @unique
-  name          String
-  country       String?
-  distanceKm    Float?
-  difficulty    String?
-  elevationGain Int?
-  description   String?
-  geometry      String
-  trailType     String  @default("regional")
-  createdAt     DateTime @default(now())
+// ------------------------------------------------------------------ VISITS
+
+model Visit {
+  id      String @id @default(cuid())
+  placeId String
+  tripId  String?
+  userId  String?
+
+  visitedAt      DateTime @default(now())
+  personalRating Int?
+  /// loved | good | okay | not_worth_it
+  verdict        String?
+  notes          String   @default("")
+  /// Coordinates recorded at check-in, if GPS was active.
+  lat            Float?
+  lng            Float?
+
+  place Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  trip  Trip? @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([placeId])
+  @@index([tripId])
+}
+
+// --------------------------------------------------------------- GPS TRACKS
+
+/// Recorded only when the user explicitly starts tracking.
+model GpsTrack {
+  id     String @id @default(cuid())
+  tripId String?
+  userId String?
+
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  /// Derived from points on stop.
+  distanceMeters Int?
+
+  trip   Trip?           @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  user   User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  points GpsTrackPoint[]
+
+  @@index([tripId])
+}
+
+model GpsTrackPoint {
+  id      String @id @default(cuid())
+  trackId String
+
+  recordedAt DateTime
+  lat        Float
+  lng        Float
+  accuracy   Float?
+  speed      Float?
+  altitude   Float?
+
+  track GpsTrack @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@index([trackId, recordedAt])
+}
+
+// ------------------------------------------------------- PROVIDER PLUMBING
+
+/// Read-through cache for geocoding, routing, source metadata and research, so
+/// free community APIs are not called repeatedly for identical inputs.
+model ProviderCache {
+  key       String   @id
+  /// geocode | reverse | route | source | research | flights
+  namespace String
+  payload   String
+  fetchedAt DateTime @default(now())
+  expiresAt DateTime?
+
+  @@index([namespace])
+  @@index([expiresAt])
+}
+
+/// Status for long-running work (deep research, large imports, OCR).
+model AiJob {
+  id   String @id @default(cuid())
+  /// research | import | ocr | classify | optimize
+  kind String
+  /// pending | running | done | failed
+  status String @default("pending")
+  /// Progress as "3/7" style step counters.
+  step      Int    @default(0)
+  totalSteps Int   @default(0)
+  stepLabel String?
+  input     String?
+  result    String?
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([kind])
 }

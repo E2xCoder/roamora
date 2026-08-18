@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import Link from "next/link";
 import { Upload, FileJson, FileSpreadsheet, CheckCircle, AlertCircle, Loader2, Info, ArrowRight } from "lucide-react";
 
 export default function ImportPage() {
@@ -164,7 +165,9 @@ export default function ImportPage() {
               </div>
               <div>
                 <h2 className="font-bold text-sm">Google Maps CSV</h2>
-                <p className="text-xs text-muted">Takeout'tan CSV dosyasi yukle</p>
+                <p className="text-xs text-muted">
+                  Takeout&apos;tan CSV dosyası yükle
+                </p>
               </div>
             </div>
 
@@ -172,9 +175,9 @@ export default function ImportPage() {
               <div className="flex items-start gap-2">
                 <Info size={14} className="text-muted shrink-0 mt-0.5" />
                 <ul className="text-[11px] text-muted space-y-1">
-                  <li>CSV dosyasindaki yer adlari ile koordinat aranir</li>
-                  <li>50'lik gruplar halinde islenir</li>
-                  <li>Bulunamayan yerler atlanir</li>
+                  <li>CSV dosyasındaki yer adları ile koordinat aranır</li>
+                  <li>50&apos;lik gruplar halinde işlenir</li>
+                  <li>Bulunamayan yerler atlanır</li>
                 </ul>
               </div>
             </div>
@@ -223,9 +226,9 @@ export default function ImportPage() {
                 <Info size={14} className="text-muted shrink-0 mt-0.5" />
                 <ol className="text-[11px] text-muted space-y-1 list-decimal list-inside">
                   <li>takeout.google.com adresine git</li>
-                  <li>Sadece "Saved" veya "Maps" sec</li>
-                  <li>Export'u indir ve ZIP'i ac</li>
-                  <li>Saved Places.json dosyasini yukle</li>
+                  <li>Sadece &quot;Saved&quot; veya &quot;Maps&quot; seç</li>
+                  <li>Export&apos;u indir ve ZIP&apos;i aç</li>
+                  <li>Saved Places.json dosyasını yükle</li>
                 </ol>
               </div>
             </div>
@@ -255,13 +258,13 @@ export default function ImportPage() {
           <p className="text-xs text-muted mb-4">
             Harita sayfasinda haritaya tiklayarak veya link yapistirarak yer ekle
           </p>
-          <a
+          <Link
             href="/"
             className="inline-flex items-center gap-2 px-5 py-3 gradient-primary text-white rounded-2xl text-sm font-semibold hover:opacity-90 transition-opacity"
           >
             Haritaya Git
             <ArrowRight size={14} />
-          </a>
+          </Link>
         </div>
       </div>
     </div>
