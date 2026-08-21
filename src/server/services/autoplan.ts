@@ -12,6 +12,7 @@ import {
 } from "@/server/services/fact-extraction";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
+import { fetchTransitMatrix } from "@/server/services/otp-matrix";
 import {
   optimizeItinerary,
   type StopInput,
@@ -48,7 +49,7 @@ export interface AutoplanRequest {
   /** Taxonomy category ids the user cares about more; used as scoring weights. */
   interests?: string[];
   maxStops?: number;
-  profile?: "foot" | "bike" | "car";
+  profile?: "foot" | "bike" | "car" | "transit";
 }
 
 export interface StopProvenance {
@@ -143,13 +144,19 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   const searchAvailable = caps.find((c) => c.id === "search")?.available ?? false;
   const aiAvailable = caps.find((c) => c.id === "ai")?.available ?? false;
 
-  if (!searchAvailable) {
+  if (!searchAvailable || !aiAvailable) {
+    // Both a search backend and an LLM are required to turn a fetched page
+    // into structured facts — reporting only the search gap left this stage
+    // silently invisible whenever SearXNG was up but Ollama wasn't (or vice
+    // versa): OSM-only results with no explanation of why enrichment never ran.
+    const missing = [
+      !searchAvailable ? (caps.find((c) => c.id === "search")?.remedy ?? "SearXNG yapılandırılmamış") : null,
+      !aiAvailable ? (caps.find((c) => c.id === "ai")?.remedy ?? "AI sağlayıcı yapılandırılmamış") : null,
+    ].filter(Boolean);
     trace.push({
       stage: "web-research",
       status: "skipped",
-      detail:
-        caps.find((c) => c.id === "search")?.remedy ??
-        "SearXNG yapılandırılmamış — açılış saati/fiyat bilgisi yalnızca OSM'den alınabildi.",
+      detail: `${missing.join(" ")} — açılış saati/fiyat bilgisi yalnızca OSM'den alınabildi.`,
     });
   }
 
@@ -306,12 +313,41 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
 
   // --- 5. real routing + the EXISTING deterministic optimizer --------------
   const points = [start, ...finalStops.map((s) => s.input)];
-  const matrix = await fetchMatrix(points, profile);
-  trace.push({
-    stage: "routing",
-    status: matrix.source === "osrm" ? "ok" : "failed",
-    detail: matrix.source === "osrm" ? "OSRM matrisi hesaplandı" : "OSRM yanıt vermedi, kuş uçuşu kullanıldı",
-  });
+
+  let matrix: Awaited<ReturnType<typeof fetchMatrix>>;
+  if (profile === "transit") {
+    const transitAvailable = caps.find((c) => c.id === "transit")?.available ?? false;
+    if (transitAvailable && config.OTP_URL) {
+      const otpMatrix = await fetchTransitMatrix(points, config.OTP_URL, req.date, req.arrivalTime);
+      matrix = otpMatrix;
+      trace.push({
+        stage: "routing",
+        status: otpMatrix.source === "fallback" ? "failed" : "ok",
+        detail:
+          otpMatrix.source === "otp"
+            ? `OpenTripPlanner: ${otpMatrix.otpCalls} durak çifti için gerçek toplu taşıma rotası hesaplandı`
+            : otpMatrix.source === "otp+osrm"
+              ? `OpenTripPlanner: ${otpMatrix.otpCalls - otpMatrix.otpFailures}/${otpMatrix.otpCalls} çift gerçek toplu taşıma verisiyle, kalanı yürüyüşle`
+              : "OpenTripPlanner hiçbir çift için yanıt vermedi, yürüyüş mesafesi kullanıldı",
+      });
+    } else {
+      trace.push({
+        stage: "routing",
+        status: "failed",
+        detail:
+          caps.find((c) => c.id === "transit")?.remedy ??
+          "OTP_URL yapılandırılmamış, yürüyüş mesafesi kullanıldı",
+      });
+      matrix = await fetchMatrix(points, "foot");
+    }
+  } else {
+    matrix = await fetchMatrix(points, profile);
+    trace.push({
+      stage: "routing",
+      status: matrix.source === "osrm" ? "ok" : "failed",
+      detail: matrix.source === "osrm" ? "OSRM matrisi hesaplandı" : "OSRM yanıt vermedi, kuş uçuşu kullanıldı",
+    });
+  }
 
   const itinerary = optimizeItinerary(
     {

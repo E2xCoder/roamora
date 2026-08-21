@@ -158,7 +158,7 @@ export const autoplanRequestSchema = z.object({
   currency: z.string().max(6).optional(),
   interests: z.array(z.string().trim().min(1)).max(20).optional(),
   maxStops: z.number().int().min(1).max(16).optional(),
-  profile: z.enum(["foot", "bike", "car"]).default("foot"),
+  profile: z.enum(["foot", "bike", "car", "transit"]).default("foot"),
 });
 
 export const optimizeRequestSchema = z.object({

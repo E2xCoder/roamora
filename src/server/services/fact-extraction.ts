@@ -25,6 +25,41 @@ export class ExtractionUnavailableError extends Error {
   }
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  "&nbsp;": " ",
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&apos;": "'",
+};
+
+/**
+ * Strips a raw HTML page down to its visible text.
+ *
+ * `fetchTextCapped` deliberately returns raw HTML (other callers, e.g. the
+ * import pipeline's meta-tag reader, need the markup) — but feeding that raw
+ * HTML straight into the extraction prompt was a real, measured bug: a real
+ * page's `<head>` (meta tags, hreflang links, inline CSS/JS) routinely runs
+ * to 10,000+ characters before any visible body text starts, so slicing the
+ * first 4000 raw characters — as this module used to do — could hand the
+ * model nothing but boilerplate and never reach the actual opening-hours or
+ * price text at all. Confirmed directly against a real page (a Poznań
+ * museum's site): its "GODZINY OTWARCIA" heading sat at byte 51,422, far
+ * outside that old 4000-character raw-HTML window.
+ */
+export function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(Number(code)))
+    .replace(/&[a-zA-Z#0-9]+;/g, (entity) => HTML_ENTITIES[entity] ?? " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 const factsSchema = z.object({
   openingHoursText: z.string().max(200).nullable(),
   priceAmount: z.number().min(0).max(100_000).nullable(),
@@ -81,7 +116,7 @@ export async function extractFactsFromText(
     );
   }
 
-  const trimmed = pageText.slice(0, 4000).trim();
+  const trimmed = htmlToPlainText(pageText).slice(0, 4000).trim();
   if (!trimmed) return null;
 
   const prompt = `You are reading a web page about travel destinations. Find facts specifically about this place: "${placeName}".
@@ -134,14 +169,48 @@ Do not guess. If a fact is not clearly stated in the text, use null for it.`;
 
 /**
  * Converts a free-text opening-hours statement extracted by the model (e.g.
- * "Mon-Fri 9:00-17:00, Sat 10:00-14:00") into OSM `opening_hours` syntax, so
- * it can be resolved by the same deterministic parser used for real OSM tags.
- * Deliberately narrow: only handles the exact patterns the extraction prompt
- * asks the model to produce. Anything else returns null rather than guessing
- * a translation.
+ * "Wt. - Pt.: 9:00 - 18:00 So. - Nd.: 10:00 - 19:00") into OSM `opening_hours`
+ * syntax, so it can be resolved by the same deterministic parser used for
+ * real OSM tags.
+ *
+ * Multilingual: real pages state hours in whatever language the destination
+ * speaks, and the model faithfully preserves that — an English-only day-name
+ * table meant every non-English extraction, however textually correct,
+ * silently failed to become a usable schedule constraint (measured live:
+ * real German, French and Polish extractions all correct as text, 0/3 usable
+ * downstream). Day names are matched per-language (English/German/French/
+ * Polish/Turkish); the language whose dictionary matches the most day-tokens
+ * in the string wins, which resolves genuinely ambiguous short tokens shared
+ * across languages (e.g. "So" = Sonntag/Sunday in German, Sobota/Saturday in
+ * Polish) by using the token's actual context rather than checking languages
+ * in a fixed, guessable order.
+ *
+ * Daily-with-no-day-mentioned is supported deliberately: a real page saying
+ * "täglich 9 bis 17 Uhr" / "ouvert aujourd'hui 09:00 - 00:00" has its "daily"
+ * qualifier stripped by the model along with the day name, since the model is
+ * asked for the *hours*, not a restatement of "every day" — by the time this
+ * function sees it, the string is just a bare time range. A bare time range
+ * with no day name found is therefore treated as "Mo-Su" rather than
+ * rejected, matching what both real pages actually meant.
+ *
+ * Still deliberately conservative in the failure direction: if no time
+ * pattern is found anywhere in the string, this returns null immediately,
+ * regardless of how many day names are present — this is what rejects a
+ * hallucinated day-list with no real hours (regression: a real extraction
+ * over a Hagia Sophia "best time to visit" page returned a crowd-calendar
+ * widget's day-abbreviation-plus-legend text, "Pzt Sal Çar Per Cum Cmt Paz
+ * Hoş Kalabalık Çok Kalabalık Kapalı" — seven real Turkish day names, zero
+ * digits). Likewise, a day-group (e.g. "Tu-Fr") that has no time range
+ * immediately following it before the next day-group rejects the *entire*
+ * result rather than emitting a partial, guessed schedule — a half-right
+ * constraint fed to the optimizer is worse than an honestly-missing one.
  */
-export function looseTextToOsmSyntax(text: string): string | null {
-  const DAY_NAMES: Record<string, string> = {
+
+type OsmDay = "Mo" | "Tu" | "We" | "Th" | "Fr" | "Sa" | "Su";
+type DayMap = Record<string, OsmDay>;
+
+const DAY_MAPS: Record<string, DayMap> = {
+  english: {
     monday: "Mo", mon: "Mo",
     tuesday: "Tu", tue: "Tu", tues: "Tu",
     wednesday: "We", wed: "We",
@@ -149,24 +218,194 @@ export function looseTextToOsmSyntax(text: string): string | null {
     friday: "Fr", fri: "Fr",
     saturday: "Sa", sat: "Sa",
     sunday: "Su", sun: "Su",
-  };
+  },
+  german: {
+    montag: "Mo", mo: "Mo",
+    dienstag: "Tu", di: "Tu",
+    mittwoch: "We", mi: "We",
+    donnerstag: "Th", do: "Th",
+    freitag: "Fr", fr: "Fr",
+    samstag: "Sa", sonnabend: "Sa", sa: "Sa",
+    sonntag: "Su", so: "Su",
+  },
+  french: {
+    lundi: "Mo", lun: "Mo",
+    mardi: "Tu", mar: "Tu",
+    mercredi: "We", mer: "We",
+    jeudi: "Th", jeu: "Th",
+    vendredi: "Fr", ven: "Fr",
+    samedi: "Sa", sam: "Sa",
+    dimanche: "Su", dim: "Su",
+  },
+  polish: {
+    poniedziałek: "Mo", poniedzialek: "Mo", pon: "Mo",
+    wtorek: "Tu", wt: "Tu",
+    środa: "We", sroda: "We", "śr": "We", sr: "We",
+    czwartek: "Th", czw: "Th",
+    piątek: "Fr", piatek: "Fr", pt: "Fr",
+    sobota: "Sa", sob: "Sa", so: "Sa",
+    niedziela: "Su", nd: "Su", ndz: "Su",
+  },
+  turkish: {
+    pazartesi: "Mo", pzt: "Mo",
+    "salı": "Tu", sali: "Tu", sal: "Tu",
+    "çarşamba": "We", carsamba: "We", "çar": "We", car: "We",
+    "perşembe": "Th", persembe: "Th", per: "Th",
+    cuma: "Fr", cum: "Fr",
+    cumartesi: "Sa", cmt: "Sa",
+    pazar: "Su", paz: "Su",
+  },
+};
 
-  let normalized = text.trim();
-  if (!normalized) return null;
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  // Replace English day names/abbreviations with OSM's two-letter tokens.
-  normalized = normalized.replace(/\b([A-Za-z]+)\b/g, (word) => {
-    const key = word.toLowerCase();
-    return DAY_NAMES[key] ?? word;
-  });
+interface DayMatch {
+  index: number;
+  end: number;
+  code: OsmDay;
+}
 
-  // Already looks like OSM syntax (e.g. "Mo-Fr 9:00-17:00") — pad single-digit
-  // hours to two digits, which the deterministic parser requires.
-  const padded = normalized.replace(
-    /\b(\d):([0-5]\d)\b/g,
-    (_, h: string, m: string) => `0${h}:${m}`
-  );
+function findDayMatches(text: string, dayMap: DayMap): DayMatch[] {
+  const keys = Object.keys(dayMap).sort((a, b) => b.length - a.length);
+  const pattern = keys.map(escapeRegExp).join("|");
+  const re = new RegExp(`(?<![\\p{L}])(${pattern})(?![\\p{L}])`, "giu");
+  const matches: DayMatch[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    matches.push({ index: m.index, end: m.index + m[0].length, code: dayMap[m[0].toLowerCase()] });
+  }
+  return matches;
+}
 
-  const looksValid = /^(Mo|Tu|We|Th|Fr|Sa|Su)/.test(padded) && /\d{2}:\d{2}-\d{2}:\d{2}/.test(padded);
-  return looksValid ? padded : null;
+/** Picks whichever language's day-name table matches the most tokens in the string. */
+function bestDayMatches(text: string): DayMatch[] {
+  let best: DayMatch[] = [];
+  for (const lang of Object.keys(DAY_MAPS)) {
+    const matches = findDayMatches(text, DAY_MAPS[lang]);
+    if (matches.length > best.length) best = matches;
+  }
+  return best;
+}
+
+interface TimeRange {
+  index: number;
+  end: number;
+  open: string;
+  close: string;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/**
+ * A close time of exactly midnight ("00:00") cannot be expressed as a
+ * same-day close — `resolveOpeningHoursForDate` has no notion of a stop that
+ * closes "tomorrow" (see `widestWindow` in opening-hours.ts, which already
+ * excludes close<=open spans for the same reason). "23:59" is the existing
+ * sentinel this codebase uses elsewhere for "open until end of day", so
+ * reusing it here stays consistent rather than inventing a second one.
+ */
+function closeFor(close: string): string {
+  return close === "00:00" ? "23:59" : close;
+}
+
+function findTimeRanges(text: string): TimeRange[] {
+  const ranges: TimeRange[] = [];
+
+  // "09:00 - 18:00", "9:00-18:00", "9h00 à 21h00" (colon or "h" delimiter on
+  // both sides of the range).
+  const reColon = /(\d{1,2})(?::(\d{2})|h(\d{2})?)\s*[-–—]\s*(\d{1,2})(?::(\d{2})|h(\d{2})?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = reColon.exec(text))) {
+    const oh = Number(m[1]);
+    const om = Number(m[2] ?? m[3] ?? 0);
+    const ch = Number(m[4]);
+    const cm = Number(m[5] ?? m[6] ?? 0);
+    if (oh > 23 || ch > 23 || om > 59 || cm > 59) continue;
+    ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:${pad2(om)}`, close: `${pad2(ch)}:${pad2(cm)}` });
+  }
+
+  // "9 bis 17 Uhr" / "9-17 Uhr" — bare hour numbers, no colon on either side,
+  // German's spoken-hours convention. Requires the trailing "Uhr" so a plain
+  // number range elsewhere in the text (a price range, a page count) is never
+  // mistaken for a time.
+  const reUhr = /\b(\d{1,2})\s*(?:-|–|—|bis)\s*(\d{1,2})\s*Uhr\b/gi;
+  while ((m = reUhr.exec(text))) {
+    const oh = Number(m[1]);
+    const ch = Number(m[2]);
+    if (oh > 23 || ch > 23) continue;
+    const overlapsColonMatch = ranges.some((r) => r.index < m!.index + m![0].length && m!.index < r.end);
+    if (overlapsColonMatch) continue;
+    ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:00`, close: `${pad2(ch)}:00` });
+  }
+
+  return ranges.sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Only a dash (optionally with surrounding whitespace/periods) between two
+ * day names — safe to merge into one range, e.g. "Wt. - Pt." -> "Tu-Fr".
+ *
+ * Deliberately does NOT treat a comma or a word like "and" as mergeable: a
+ * comma-separated day *list* ("Mo, We, Fr") means exactly those three days,
+ * not a range spanning Tuesday and Thursday too — merging first-and-last
+ * across a comma or "and" would silently turn a list into a wrong range.
+ * That case is genuinely unhandled (no comma-list evidence in the real
+ * pages this was built against) — a day group whose neighbour isn't a plain
+ * dash simply won't merge, which surfaces as a rejected result rather than
+ * a guessed one, matching the rest of this function's failure direction.
+ */
+function isPureConnector(s: string): boolean {
+  return /^[\s.]*[-–—][\s.]*$/.test(s);
+}
+
+export function looseTextToOsmSyntax(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const times = findTimeRanges(trimmed);
+  if (times.length === 0) return null;
+
+  const dayMatches = bestDayMatches(trimmed);
+
+  if (dayMatches.length === 0) {
+    const formatted = times.map((t) => `${t.open}-${closeFor(t.close)}`).join(",");
+    return `Mo-Su ${formatted}`;
+  }
+
+  // Merge adjacent day matches (only whitespace/punctuation/"and" between
+  // them) into ranges ("Tu-Fr") or, when there's just one, a single day.
+  const groups: Array<{ start: number; end: number; spec: string }> = [];
+  let i = 0;
+  while (i < dayMatches.length) {
+    let j = i;
+    while (j + 1 < dayMatches.length && isPureConnector(trimmed.slice(dayMatches[j].end, dayMatches[j + 1].index))) {
+      j++;
+    }
+    const first = dayMatches[i].code;
+    const last = dayMatches[j].code;
+    groups.push({
+      start: dayMatches[i].index,
+      end: dayMatches[j].end,
+      spec: first === last ? first : `${first}-${last}`,
+    });
+    i = j + 1;
+  }
+
+  const usedTimeIndices = new Set<number>();
+  const parts: string[] = [];
+  for (let g = 0; g < groups.length; g++) {
+    const group = groups[g];
+    const boundary = g + 1 < groups.length ? groups[g + 1].start : trimmed.length;
+    const timeIdx = times.findIndex((t, idx) => !usedTimeIndices.has(idx) && t.index >= group.end && t.index < boundary);
+    if (timeIdx === -1) return null; // a day group with no hours right after it — refuse rather than guess
+    usedTimeIndices.add(timeIdx);
+    const t = times[timeIdx];
+    parts.push(`${group.spec} ${t.open}-${closeFor(t.close)}`);
+  }
+
+  return parts.length > 0 ? parts.join("; ") : null;
 }

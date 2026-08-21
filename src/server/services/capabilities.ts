@@ -128,7 +128,10 @@ async function probeOtp(): Promise<Capability> {
   }
 
   try {
-    const res = await fetch(`${config.OTP_URL}/otp/routers/default`, {
+    // OTP 2.x's routable server exposes build info at `/otp`; the old OTP1
+    // `/otp/routers/default` REST path this used to check no longer exists
+    // in 2.9 and always 404s, which made this probe report "available" wrong.
+    const res = await fetch(`${config.OTP_URL}/otp`, {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) throw new Error(String(res.status));

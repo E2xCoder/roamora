@@ -19,7 +19,7 @@ export interface Matrix {
   durations: number[][];
   /** distances[i][j] = metres from point i to point j. */
   distances: number[][];
-  source: "osrm" | "fallback";
+  source: "osrm" | "otp" | "otp+osrm" | "fallback";
 }
 
 function haversineMeters(a: MatrixPoint, b: MatrixPoint): number {
