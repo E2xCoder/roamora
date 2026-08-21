@@ -125,6 +125,40 @@ export const importUrlSchema = z.object({
   url: z.string().url().max(2000),
 });
 
+const hhmm = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "SS:DD formatında olmalı (ör. 13:30)");
+
+export const optimizeStopSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1).max(300),
+  lat: latitude,
+  lng: longitude,
+  category: z.string().optional(),
+  visitMinutes: z.number().int().min(0).max(600).optional(),
+  earliestTime: hhmm.optional(),
+  latestTime: hhmm.optional(),
+  fixedTime: hhmm.optional(),
+  locked: z.boolean().optional(),
+  estimatedCost: z.number().min(0).max(1_000_000).optional(),
+});
+
+export const optimizeRequestSchema = z.object({
+  stops: z.array(optimizeStopSchema).min(1).max(30),
+  dayStart: hhmm.default("09:00"),
+  dayEnd: hhmm.default("20:00"),
+  start: z.object({
+    lat: latitude,
+    lng: longitude,
+    name: z.string().max(300).optional(),
+  }),
+  end: z
+    .object({ lat: latitude, lng: longitude, name: z.string().max(300).optional() })
+    .optional(),
+  profile: z.enum(["foot", "bike", "car"]).default("foot"),
+  realismFactor: z.number().min(1).max(2).optional(),
+});
+
 /** Shape returned to the client for every failed request. */
 export interface ApiErrorBody {
   error: string;

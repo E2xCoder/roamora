@@ -162,7 +162,7 @@ Ordered per §96. Each phase ends green: `typecheck && lint && test && build`, w
 | **1b — Auth** ✅ | scrypt password hashing, signed session cookie, middleware gate, login page, `auth:hash` script | **Done** — see §12 |
 | **2 — Places** 🟡 | Place service, taxonomy, provenance, `/api/places` with pagination+bbox, place detail page, sources & media surfaced | Detail page, provenance, soft delete and nearby done; media upload and full edit UI remain |
 | **3 — Import** 🟡 | Ingestion pipeline, source providers, location engine, OCR, classification, dedup, staged progress UI | Pipeline, six providers, dedup and staged UI done — see §13. OCR/screenshot and file upload remain |
-| **4 — Trips** | Bucket list, trip model, optimizer, itinerary timeline, route visualization, three variants, manual editing | Itinerary generated from real geography; lock + regenerate works |
+| **4 — Trips** 🟡 | Bucket list, trip model, optimizer, itinerary timeline, route visualization, three variants, manual editing | Deterministic single-day optimizer done — see §14. Persisted multi-day trips, three route variants, locked-stop regeneration UI remain |
 | **5 — Live travel** | Active-trip screen, GPS progress, arrival detection, visited marking, track recording | Verified on a physical phone |
 | **6 — Hiking** | Komoot ingestion, GPX import/parse, HikingRoute entity, elevation, map rendering | GPX renders; Komoot URL preserved |
 | **7 — Destination intelligence** | Research sessions, hidden-gem & tourist-trap scoring, food research, destination profile | Research persists with per-result sources and timestamps |
@@ -335,5 +335,34 @@ Fixed by declaring the update schema explicitly with no defaults. `scripts/repai
 1. *Confident nonsense.* A deleted TikTok still serves the platform's chrome. The pipeline read "TikTok - Make Your Day" as post content, extracted "Make Your Day" as a place, geocoded it to an unrelated shop in Greece, and reported **0.65 confidence** — precisely the fabrication §99 forbids. `boilerplate.ts` now rejects platform chrome outright unless the source supplied coordinates; the same URL returns `422 BOILERPLATE_ONLY` explaining the post is deleted, private or region-locked.
 
 2. *Category silently downgraded.* The pipeline emits taxonomy ids, but the save path ran them through `legacyCategoryToId`, which only knew the old free-text values — so a place classified `castle` was stored as `other`. The resolver now passes through values that are already valid ids.
+
+---
+
+## 14. Phase 4 (partial) — deterministic single-day itinerary optimizer
+
+**Why this exists.** The user's actual workflow before Roamora: mark places one at a time, hand the list to ChatGPT, watch it sequence them starting from the farthest point and working inward — because an LLM has no real notion of geographic distance — then manually pull walking/transit distances from Google Maps and opening-hours constraints himself and feed them back in until the model produced something usable. The ask was explicit: *"ben bir programi eğitmek ve onun bunu bana yapmasını istiyorum"* — a program that does the distance-fetching and sequencing itself, not a chat he has to keep correcting.
+
+**Design consequence.** Sequencing never goes through an LLM. `/api/trips`'s existing Ollama-based planner is untouched but is a separate, older path (§1 §12) — this is a new, independent feature: a real distance matrix plus a real constrained-insertion algorithm.
+
+**`src/server/services/osrm-matrix.ts`** — one OSRM `/table/` call returns the full pairwise duration/distance matrix for all stops, instead of O(n²) `/route/` calls. Falls back to a straight-line matrix, explicitly flagged (`matrixSource: "fallback"`), if the routing provider is unreachable.
+
+**`src/server/services/itinerary-optimizer.ts`** — pure, synchronous, no network, no randomness: same input always produces the same output. Cheapest-insertion construction (the classic TSP heuristic) extended with time-window feasibility checks, followed by a bounded 2-opt pass that only reorders unlocked, non-fixed-time stops. Per-stop inputs are exactly what the user was calculating by hand: `earliestTime` (opens at), `latestTime` (last entry), `fixedTime` (a timed show — a hard anchor the solver builds everything else around), `visitMinutes`, `estimatedCost`, `locked` (pin a stop's position).
+
+**Failure is reported, not hidden** (master-spec §30, "Failure Mode"): an unreachable fixed-time appointment names the stop and the earliest possible arrival; a day that runs past its end time reports the overrun in minutes; a stop that cannot be inserted anywhere without breaking another stop's fixed time is flagged individually. Cost is summed only when every included stop has a price — otherwise `costKnown: false`, never a guessed total.
+
+**`POST /api/itinerary/optimize`** — stateless: takes the current stop list plus constraints, returns the solved order and full schedule. No trip record has to be created first, matching the "pick places, get a route" flow directly.
+
+**UI** — the existing map-page route builder (tap pins → add to route) gained a "Zamanlama ve Optimizasyon" panel: start location (current GPS, or first stop), day start/end, and per-stop constraint fields behind an expand toggle. "Rotayı Optimize Et" reorders the visible stop list to match the solved sequence and shows arrival/departure time chips, wait time, and any conflicts inline.
+
+**Two real bugs caught during testing, both in the conflict-reporting path, not the ordering itself:**
+
+1. A fixed-time stop's "did we make it" check compared the *forced* schedule time against itself, which is always equal by construction — so a genuinely missed appointment silently reported `feasible: true`. Fixed by checking the pre-adjustment raw arrival against the target instead.
+2. `latestTime` was treated as a hard gate during insertion, so a stop that could not make its own cutoff from any position was dropped from the plan entirely (a vague "unplaceable") rather than being placed at its best slot with a specific "you'll arrive after last entry" conflict. `earliestTime`/`latestTime` are now soft — they only gate a wait or a reported violation; only `fixedTime` (an explicit appointment) blocks insertion outright, to protect it from being pushed later by another stop.
+
+**Verified live against real Prague coordinates and the live OSRM service** (not mocked): three real places submitted in a deliberately bad order resolved to a geographically sensible sequence (3.89 km, 62 min) with `matrixSource: "osrm"`. An impossible fixed-time appointment (09:05, unreachable from the given start) was correctly rejected with the precise earliest possible arrival (09:39) and correctly identified the *other* stops as the ones that would need to be dropped to protect it. An `earliestTime` constraint produced a genuine computed wait (72 minutes) rather than silently ignoring it. Cost summed correctly across stops and reported `costKnown: false` when one stop's price was left blank. Exercised through the actual UI (button clicks, not direct API calls): route mode → add real stops → expand scheduling → optimize → time chips and cost warning rendered correctly.
+
+11 new tests (`tests/itinerary-optimizer.test.ts`) cover the algorithm in isolation, including a direct reproduction of the reported bug — three points submitted farthest-first, asserting the solver produces the efficient start→near→mid→far order instead. `npm run verify` clean at 117 tests total.
+
+**What remains for the full Phase 4 scope**: this optimizes one day, ephemerally, in the browser session — it does not yet persist into a `Trip`/`TripDay`/`TripActivity` record, generate multiple days, or produce the three named variants (Maximum Experience / Least Walking / Relaxed) from §5 of this document. Those build on the same solver; the hard part — real distances plus constraint-respecting sequencing — is done.
 
 **Verified end-to-end:** dead TikTok → honest 422; Google Maps URL → Prague Castle at 0.97 confidence, auto-classified `castle`; Wikipedia → same bridge within 10 m of the Maps coordinate; duplicate detected and merged; notes preserved. 99 tests, `npm run verify` clean.

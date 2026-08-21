@@ -5,7 +5,13 @@ import dynamic from "next/dynamic";
 import AddPlaceModal from "@/components/AddPlaceModal";
 import PlaceCard from "@/components/PlaceCard";
 import ExtractPanel from "@/components/ExtractPanel";
-import RoutePanel, { type Profile, type RouteLeg } from "@/components/RoutePanel";
+import RoutePanel, {
+  type Profile,
+  type RouteLeg,
+  type StopConstraint,
+  type ScheduledStop,
+  type OptimizeConflict,
+} from "@/components/RoutePanel";
 import {
   CATEGORY_EMOJI,
   haversine,
@@ -57,6 +63,21 @@ export default function HomePage() {
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeFallback, setRouteFallback] = useState(false);
   const [profile, setProfile] = useState<Profile>("foot");
+
+  // --- scheduling / optimization state ---
+  const [constraints, setConstraints] = useState<Record<string, StopConstraint>>({});
+  const [dayStart, setDayStart] = useState("09:00");
+  const [dayEnd, setDayEnd] = useState("20:00");
+  const [startLocation, setStartLocation] = useState<
+    { lat: number; lng: number; name?: string } | null
+  >(null);
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimizeError, setOptimizeError] = useState<string | null>(null);
+  const [schedule, setSchedule] = useState<ScheduledStop[] | null>(null);
+  const [conflicts, setConflicts] = useState<OptimizeConflict[]>([]);
+  const [optimizedCost, setOptimizedCost] = useState(0);
+  const [costKnown, setCostKnown] = useState(false);
+  const [matrixSource, setMatrixSource] = useState<"osrm" | "fallback" | null>(null);
 
   // --- live state ---
   const [live, setLive] = useState(false);
@@ -196,6 +217,9 @@ export default function HomePage() {
     });
     setPanelView("route");
     setShowPanel(true);
+    // The stop set changed — the last computed schedule no longer applies.
+    setSchedule(null);
+    setConflicts([]);
   }
 
   function moveStop(index: number, dir: -1 | 1) {
@@ -206,12 +230,105 @@ export default function HomePage() {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
+    setSchedule(null);
+    setConflicts([]);
   }
 
   function clearRoute() {
     setStops([]);
     setLive(false);
     setActiveStop(0);
+    setSchedule(null);
+    setConflicts([]);
+  }
+
+  function updateConstraint(stopId: string, patch: StopConstraint) {
+    setConstraints((prev) => ({ ...prev, [stopId]: { ...prev[stopId], ...patch } }));
+    // The previous schedule no longer reflects the current input.
+    setSchedule(null);
+    setConflicts([]);
+  }
+
+  function useCurrentLocationAsStart() {
+    if (!("geolocation" in navigator)) {
+      setOptimizeError("Tarayıcı konum desteklemiyor");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setStartLocation({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          name: "Şu anki konumum",
+        });
+        setOptimizeError(null);
+      },
+      () => setOptimizeError("Konum alınamadı — izin verildi mi?"),
+      { enableHighAccuracy: true, timeout: 10_000 }
+    );
+  }
+
+  function useFirstStopAsStart() {
+    if (stops.length === 0) return;
+    setStartLocation({ lat: stops[0].lat, lng: stops[0].lng, name: stops[0].name });
+  }
+
+  /**
+   * Runs the deterministic solver — real OSRM distances plus the constraints
+   * entered above, never an LLM guess. Reorders `stops` to match the result
+   * and keeps every reported conflict visible rather than hiding a plan that
+   * does not actually work.
+   */
+  async function optimizeRoute() {
+    if (!startLocation || stops.length === 0) return;
+    setOptimizing(true);
+    setOptimizeError(null);
+
+    try {
+      const res = await fetch("/api/itinerary/optimize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dayStart,
+          dayEnd,
+          start: startLocation,
+          profile,
+          stops: stops.map((s) => ({
+            id: s.id,
+            name: s.name,
+            lat: s.lat,
+            lng: s.lng,
+            category: s.category,
+            ...constraints[s.id],
+          })),
+        }),
+      });
+
+      const body = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        setOptimizeError(body?.error ?? `Optimizasyon başarısız (${res.status})`);
+        return;
+      }
+
+      // Reorder the stops shown on the map/list to match the solved sequence.
+      const orderMap = new Map(
+        (body.stops as { id: string }[]).map((s, i) => [s.id, i])
+      );
+      setStops((prev) =>
+        [...prev].sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0))
+      );
+
+      setSchedule(body.stops);
+      setConflicts(body.conflicts ?? []);
+      setOptimizedCost(body.totalCost ?? 0);
+      setCostKnown(Boolean(body.costKnown));
+      setMatrixSource(body.matrixSource ?? null);
+    } catch (err) {
+      setOptimizeError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
+    } finally {
+      setOptimizing(false);
+    }
   }
 
   function toggleLive() {
@@ -628,12 +745,31 @@ export default function HomePage() {
                   distanceToNext={distanceToNext}
                   onProfileChange={setProfile}
                   onMove={moveStop}
-                  onRemove={(id) =>
-                    setStops((prev) => prev.filter((s) => s.id !== id))
-                  }
+                  onRemove={(id) => {
+                    setStops((prev) => prev.filter((s) => s.id !== id));
+                    setSchedule(null);
+                    setConflicts([]);
+                  }}
                   onClear={clearRoute}
                   onToggleLive={toggleLive}
                   onSetActiveStop={setActiveStop}
+                  constraints={constraints}
+                  onConstraintChange={updateConstraint}
+                  dayStart={dayStart}
+                  dayEnd={dayEnd}
+                  onDayStartChange={setDayStart}
+                  onDayEndChange={setDayEnd}
+                  startLocation={startLocation}
+                  onUseCurrentLocation={useCurrentLocationAsStart}
+                  onUseFirstStopAsStart={useFirstStopAsStart}
+                  onOptimize={optimizeRoute}
+                  optimizing={optimizing}
+                  optimizeError={optimizeError}
+                  schedule={schedule}
+                  conflicts={conflicts}
+                  totalCost={optimizedCost}
+                  costKnown={costKnown}
+                  matrixSource={matrixSource}
                 />
               )}
 
