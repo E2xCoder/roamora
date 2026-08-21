@@ -1,0 +1,176 @@
+/**
+ * A conservative subset parser for OSM's `opening_hours` tag syntax.
+ *
+ * The full spec (https://wiki.openstreetmap.org/wiki/Key:opening_hours) covers
+ * sunrise/sunset times, week numbers, school/public holidays, comments and
+ * more. Implementing all of it risks silently mis-parsing an edge case into a
+ * confidently wrong constraint — and a wrong `latestTime` fed into the
+ * itinerary optimizer doesn't just look odd, it can make a real museum visit
+ * get scheduled after closing, or get rejected as "impossible" when it
+ * wasn't. So this parser handles the common, high-confidence cases —
+ * weekday ranges, time ranges, closed days, 24/7, a leading month range — and
+ * refuses ("unparseable") the moment it meets anything outside that grammar,
+ * rather than guessing at the rest.
+ */
+
+export interface DayWindow {
+  open: string; // "HH:MM"
+  close: string; // "HH:MM"
+}
+
+export type OpeningHoursResult =
+  | { status: "open"; windows: DayWindow[] }
+  | { status: "closed" }
+  | { status: "always" }
+  | { status: "unparseable"; reason: string };
+
+const DAY_TOKENS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] as const;
+type DayToken = (typeof DAY_TOKENS)[number];
+
+const MONTH_TOKENS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
+
+function dayTokenFor(date: Date): DayToken {
+  // getDay(): 0=Sunday..6=Saturday
+  return DAY_TOKENS[(date.getDay() + 6) % 7];
+}
+
+function expandDaySpec(spec: string): Set<DayToken> | null {
+  const out = new Set<DayToken>();
+  for (const part of spec.split(",")) {
+    const token = part.trim();
+    if (token === "PH" || token === "SH") continue; // no holiday calendar available — never claimed
+
+    const range = token.match(/^(Mo|Tu|We|Th|Fr|Sa|Su)-(Mo|Tu|We|Th|Fr|Sa|Su)$/);
+    if (range) {
+      const start = DAY_TOKENS.indexOf(range[1] as DayToken);
+      const end = DAY_TOKENS.indexOf(range[2] as DayToken);
+      if (start === -1 || end === -1) return null;
+      let i = start;
+      while (true) {
+        out.add(DAY_TOKENS[i]);
+        if (i === end) break;
+        i = (i + 1) % 7;
+      }
+      continue;
+    }
+
+    if ((DAY_TOKENS as readonly string[]).includes(token)) {
+      out.add(token as DayToken);
+      continue;
+    }
+
+    return null; // unrecognised day token — bail rather than guess
+  }
+  return out;
+}
+
+function monthInRange(date: Date, spec: string): boolean | null {
+  const range = spec.match(
+    /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/
+  );
+  if (!range) return null;
+  const start = MONTH_TOKENS.indexOf(range[1] as (typeof MONTH_TOKENS)[number]);
+  const end = MONTH_TOKENS.indexOf(range[2] as (typeof MONTH_TOKENS)[number]);
+  if (start === -1 || end === -1) return null;
+
+  const m = date.getMonth();
+  if (start <= end) return m >= start && m <= end;
+  return m >= start || m <= end; // wraps across year end, e.g. Nov-Feb
+}
+
+function parseTimeSpec(spec: string): DayWindow[] | "off" | null {
+  const trimmed = spec.trim();
+  if (trimmed === "off" || trimmed === "closed") return "off";
+
+  const windows: DayWindow[] = [];
+  for (const part of trimmed.split(",")) {
+    const m = part.trim().match(/^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/);
+    if (!m) return null;
+    windows.push({ open: `${m[1]}:${m[2]}`, close: `${m[3]}:${m[4]}` });
+  }
+  return windows.length > 0 ? windows : null;
+}
+
+/**
+ * Resolves an OSM `opening_hours` string against one specific calendar date.
+ *
+ * Rules are separated by `;` and applied in order, with a later rule for the
+ * same day overriding an earlier one — matching the OSM spec's own
+ * override semantics. Any rule this parser cannot confidently interpret
+ * fails the whole string closed to "unparseable", rather than silently
+ * dropping just that rule (a dropped exception rule, e.g. "Mo off" after a
+ * blanket "Mo-Su 09:00-18:00", would wrongly report a closed day as open).
+ */
+export function resolveOpeningHoursForDate(raw: string, date: Date): OpeningHoursResult {
+  const value = raw?.trim();
+  if (!value) return { status: "unparseable", reason: "boş değer" };
+  if (value === "24/7") return { status: "always" };
+
+  const today = dayTokenFor(date);
+  let result: OpeningHoursResult | null = null;
+
+  for (const ruleRaw of value.split(";")) {
+    const rule = ruleRaw.trim();
+    if (!rule) continue;
+
+    let remainder = rule;
+
+    // Optional leading month range, e.g. "Apr-Oct Mo-Fr 09:00-17:00".
+    const monthMatch = remainder.match(/^([A-Za-z]{3}-[A-Za-z]{3})\s+(.*)$/);
+    if (monthMatch && MONTH_TOKENS.some((m) => monthMatch[1].startsWith(m))) {
+      const inMonth = monthInRange(date, monthMatch[1]);
+      if (inMonth === null) {
+        return { status: "unparseable", reason: `anlaşılamayan ay aralığı: "${monthMatch[1]}"` };
+      }
+      if (!inMonth) continue; // this rule does not apply in the given month
+      remainder = monthMatch[2];
+    }
+
+    const spaceIdx = remainder.indexOf(" ");
+    if (spaceIdx === -1) {
+      return { status: "unparseable", reason: `çözümlenemeyen kural: "${rule}"` };
+    }
+
+    const daySpecRaw = remainder.slice(0, spaceIdx);
+    const timeSpecRaw = remainder.slice(spaceIdx + 1);
+
+    const days = expandDaySpec(daySpecRaw);
+    if (days === null) {
+      return { status: "unparseable", reason: `anlaşılamayan gün: "${daySpecRaw}"` };
+    }
+    if (!days.has(today)) continue; // rule does not govern the requested date
+
+    const timeResult = parseTimeSpec(timeSpecRaw);
+    if (timeResult === null) {
+      return { status: "unparseable", reason: `anlaşılamayan saat: "${timeSpecRaw}"` };
+    }
+
+    result = timeResult === "off" ? { status: "closed" } : { status: "open", windows: timeResult };
+  }
+
+  return result ?? { status: "closed" };
+}
+
+/**
+ * Convenience: the single widest open→close window for the day, if any.
+ *
+ * Excludes windows that span midnight (close < open, e.g. "12:00-02:00" for
+ * a bar open past midnight) — a real bug this exclusion fixes: fed as-is,
+ * "02:00" was read as a same-day 2 AM cutoff, so a venue open until 2 AM was
+ * reported as unreachable by a 10:27 arrival. The itinerary optimizer has no
+ * notion of a stop that closes "tomorrow", so an overnight window cannot be
+ * expressed as a same-day earliest/latest pair — it is better left
+ * unconstrained here than fed in wrong.
+ */
+export function widestWindow(result: OpeningHoursResult): DayWindow | null {
+  if (result.status === "always") return { open: "00:00", close: "23:59" };
+  if (result.status !== "open" || result.windows.length === 0) return null;
+
+  const sameDay = result.windows.filter((w) => w.close > w.open);
+  if (sameDay.length === 0) return null;
+
+  return sameDay.reduce((a, b) => (a.close > b.close ? a : b));
+}

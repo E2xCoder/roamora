@@ -366,3 +366,50 @@ Fixed by declaring the update schema explicitly with no defaults. `scripts/repai
 **What remains for the full Phase 4 scope**: this optimizes one day, ephemerally, in the browser session — it does not yet persist into a `Trip`/`TripDay`/`TripActivity` record, generate multiple days, or produce the three named variants (Maximum Experience / Least Walking / Relaxed) from §5 of this document. Those build on the same solver; the hard part — real distances plus constraint-respecting sequencing — is done.
 
 **Verified end-to-end:** dead TikTok → honest 422; Google Maps URL → Prague Castle at 0.97 confidence, auto-classified `castle`; Wikipedia → same bridge within 10 m of the Maps coordinate; duplicate detected and merged; notes preserved. 99 tests, `npm run verify` clean.
+
+---
+
+## 15. Phase 3.5 — autonomous discovery (destination in, itinerary out, no manual place entry)
+
+**The ask, precisely stated by the user:** the app itself must research a destination — attractions, restaurants, hidden spots, opening hours, prices — from only a destination, date, arrival/departure time and budget. Web research is required, not optional; the requirement was never "no research," it was "no *manual* research by the user." Google Maps/Places/Routes must not be a hard dependency; the stack must be open-source and self-hostable wherever practical, matching every provider choice already made in this project (OSRM, Nominatim, Overpass, Wikipedia).
+
+**What this phase delivers, honestly divided into two categories.**
+
+### Verified working now, zero extra infrastructure
+
+`POST /api/itinerary/autoplan` — `{ destination, date, arrivalTime, departureTime, budget?, interests? }` in, a scheduled itinerary out:
+
+```
+geocode destination → Overpass discovery (OSM) → score + classify + diversify
+  → OSM opening_hours resolution for the actual trip date
+  → Wikipedia summary enrichment
+  → the EXISTING, unmodified deterministic optimizer (§14) → itinerary
+```
+
+- **`overpass-discovery.ts`** — one `nwr` (combined node+way+relation) Overpass query across ten categories (attractions, historic sites, worship, food, bakeries, parks, natural features, markets, monuments, accommodation). `nwr` also closes D7 from the original audit (`src/lib/overpass.ts`'s manual Explore screen still queries `node` only, missing most real POIs, which are mapped as ways/relations).
+- **`discovery-scoring.ts`** — deterministic OSM-tag → taxonomy classification (a lookup table, not a guess: `tourism=museum` really does mean museum) and a smooth-weighted-round-robin pruning pass so a category with far more raw OSM entries (restaurants, always) cannot crowd out everything else, while a stated interest can still legitimately dominate the shortlist when the user weights it heavily.
+- **`src/lib/opening-hours.ts`** — a conservative parser for OSM's `opening_hours` mini-language: weekday ranges, multiple daily windows, exceptions ("Mo-Su 09:00-18:00; Th off"), a leading month range. Anything outside that grammar (sunrise/sunset, week numbers) is refused as `unparseable` rather than guessed — a wrong hard constraint fed into the optimizer is worse than an honestly-missing one.
+- **`wikipedia-summary.ts`** — real, sourced "why visit" text via Wikipedia's own geosearch + extract API, not an LLM paraphrase. Shares its rate-limit/backoff state with the existing photo lookup (`wikimedia.ts`) through a new common `wikipedia-client.ts`, specifically to avoid recreating the exact 429 bug already fixed once this session (two independent 1-req/sec throttles against the same host still add up to 2 req/sec).
+- Every fact carries its source and confidence (`StopProvenance`): `osm/medium` for a resolved OSM opening-hours tag, `unverified/unknown` when nothing could be confirmed. Nothing is invented to fill a gap.
+
+**Verified live, real destination, real bugs found and fixed by that testing — not simulated:**
+
+Ran against Poznań (the user's own example) end to end. Result: a real, walkable 8-stop, 4.64 km itinerary — Św. Jan Nepomucen, Czerwona Papryka, Zamek Cesarski, Studnia Bamberki, Ministerstwo Śledzia i Wódki, Pijalnia Czekolady Wedel, Hotel Śródka, Brama Poznania ICHOT — discovered from zero manually-entered places, `feasible: true`, no conflicts, in 15–17 seconds.
+
+Two real defects surfaced only by that live run, not by unit tests:
+
+1. **Overpass's public instance grants a client two concurrent "slots"** (confirmed via its own `/api/status` endpoint). An earlier version of the discovery provider split the ten categories into several smaller sequential batches to keep each request cheap — this made things *worse*: a batch whose response arrived after this process's own client-side timeout had already given up left that slot occupied server-side, starving the next batch and cascading into more timeouts and eventually a 429. Rewritten as a single request; combined with narrowing the unrestricted `historic=*` filter (which alone was expensive enough in a dense old town to push the whole query past a minute) to the specific values worth visiting, and reducing the default search radius to 1500 m, discovery now reliably completes in single-digit seconds.
+2. **Overnight-spanning opening hours produced a nonsensical constraint.** "Ministerstwo Śledzia i Wódki" — a real, well-known Poznań bar — publishes `12:00-02:00`. Read naively, `02:00` became a same-day cutoff, so the optimizer correctly (from its own perspective) reported a 10:27 arrival as eight hours late for closing. `widestWindow()` now excludes any window where `close < open` — the itinerary optimizer has no notion of a stop that closes "tomorrow," so an overnight window is left unconstrained rather than fed in wrong. Both bugs have regression tests.
+
+### Architecturally ready, requires infrastructure this session cannot deploy
+
+Two capabilities are real, working code paths behind the same honest "not configured" pattern already used for yt-dlp and Ollama (`getCapabilities()`) — but this is a sandboxed coding session, not a place a Java service or a Docker container can be stood up and left running, so neither is claimed as verified:
+
+- **Web research** (`SEARXNG_URL`) — a `ResearchProvider` against SearXNG (self-hostable, keyless — `docker run -d -p 8080:8080 searxng/searxng`) plus a schema-validated Ollama fact-extractor (`fact-extraction.ts`) fill in opening hours/prices OSM does not carry. Unconfigured, `autoplan` runs on OSM + Wikipedia alone and says so in its trace rather than silently returning less. The extraction schema, prompt and JSON validation are real and unit-tested; the live search → fetch → extract chain itself was not exercised end-to-end because no SearXNG instance exists in this environment.
+- **Transit routing** (`OTP_URL`) — OpenTripPlanner is genuine infrastructure (a separate service fed OSM + destination-specific GTFS), not an API call this codebase can complete on its own. The provider interface and capability probe exist; itineraries use walking only until it is deployed.
+
+### Explicitly not attempted this pass, and why
+
+Event discovery (needs live web research — see above), tourist-trap/review-sentiment scoring (needs many real reviews per place, which needs a search/reviews API this project has no free source for), automatic budget-triggered attraction removal (§31 of the master spec — flagged as a warning today, not auto-resolved), multi-scenario generation (Plan A/B/C), delay simulation. Attempting all of these in one pass, unverified, would have meant claiming a much larger surface area works than was actually tested — the same standard applied to every other phase of this project.
+
+30 new tests across `opening-hours.test.ts` (20) and `discovery-scoring.test.ts` (10), including direct regressions for both live-discovered bugs. `npm run verify` clean at 147 tests.

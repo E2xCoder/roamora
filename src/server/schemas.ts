@@ -143,6 +143,24 @@ export const optimizeStopSchema = z.object({
   estimatedCost: z.number().min(0).max(1_000_000).optional(),
 });
 
+export const autoplanRequestSchema = z.object({
+  destination: z.string().trim().min(1).max(200),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD bekleniyor"),
+  arrivalTime: hhmm,
+  departureTime: hhmm,
+  startLocation: z
+    .object({ lat: latitude, lng: longitude, name: z.string().max(300).optional() })
+    .optional(),
+  endLocation: z
+    .object({ lat: latitude, lng: longitude, name: z.string().max(300).optional() })
+    .optional(),
+  budget: z.number().min(0).max(1_000_000).optional(),
+  currency: z.string().max(6).optional(),
+  interests: z.array(z.string().trim().min(1)).max(20).optional(),
+  maxStops: z.number().int().min(1).max(16).optional(),
+  profile: z.enum(["foot", "bike", "car"]).default("foot"),
+});
+
 export const optimizeRequestSchema = z.object({
   stops: z.array(optimizeStopSchema).min(1).max(30),
   dayStart: hhmm.default("09:00"),

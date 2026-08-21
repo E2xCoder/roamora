@@ -59,10 +59,29 @@ const schema = z.object({
   // Optional. Absence is a reported capability gap, never a silent failure.
   YTDLP_PATH: z.string().default("yt-dlp"),
 
-  // DEFERRED (phases 7-8). Empty means the feature shows an explicit
+  // DEFERRED (phase 8). Empty means the feature shows an explicit
   // "not configured" state rather than fabricating results.
-  SEARCH_PROVIDER: z.string().optional(),
   FLIGHT_PROVIDER: z.string().optional(),
+
+  // WEB RESEARCH -------------------------------------------------------------
+  // SearXNG is a self-hostable, keyless meta-search engine — the open-source
+  // answer to "the app needs to search the web but must not require a paid
+  // API key." Optional: absence is a reported capability gap (autoplan falls
+  // back to OSM-only data with lower confidence), never a silent guess.
+  // Self-host with: docker run -d -p 8080:8080 searxng/searxng
+  SEARXNG_URL: z.string().optional(),
+
+  // TRANSIT ROUTING ------------------------------------------------------------
+  // OpenTripPlanner is a separate, self-hosted Java service fed OSM + GTFS
+  // data per destination — genuine infrastructure, not an API call this
+  // process can stand up on its own. Optional: absence means transit legs are
+  // reported as unavailable rather than estimated.
+  OTP_URL: z.string().optional(),
+
+  // AUTONOMOUS DISCOVERY -------------------------------------------------------
+  // 1500m keeps the Overpass query cheap enough to complete reliably against
+  // the public instance while still covering a walkable city-centre day.
+  DISCOVERY_RADIUS_METERS: z.coerce.number().int().min(200).max(20_000).default(1500),
 });
 
 const parsed = schema.safeParse(process.env);

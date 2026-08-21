@@ -88,12 +88,67 @@ async function probeAi(): Promise<Capability> {
   }
 }
 
+async function probeSearxng(): Promise<Capability> {
+  if (!config.SEARXNG_URL) {
+    return {
+      id: "search",
+      available: false,
+      detail: "SEARXNG_URL yapılandırılmamış",
+      remedy:
+        "Açılış saati/fiyat/etkinlik gibi web araştırması gerektiren adımlar için: `docker run -d -p 8080:8080 searxng/searxng` ile self-host et, sonra SEARXNG_URL=http://localhost:8080 ayarla.",
+    };
+  }
+
+  try {
+    const url = new URL("/search", config.SEARXNG_URL);
+    url.searchParams.set("q", "test");
+    url.searchParams.set("format", "json");
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(String(res.status));
+    return { id: "search", available: true, detail: `SearXNG (${config.SEARXNG_URL})` };
+  } catch {
+    return {
+      id: "search",
+      available: false,
+      detail: `SearXNG'e ulaşılamıyor (${config.SEARXNG_URL})`,
+      remedy: "SearXNG konteynerinin çalıştığından emin ol.",
+    };
+  }
+}
+
+async function probeOtp(): Promise<Capability> {
+  if (!config.OTP_URL) {
+    return {
+      id: "transit",
+      available: false,
+      detail: "OTP_URL yapılandırılmamış",
+      remedy:
+        "Toplu taşıma rotalaması için OpenTripPlanner ayrı bir servis olarak kurulmalı (OSM + GTFS verisiyle beslenir) — bu tek başına bir kod değişikliği değil, gerçek bir altyapı kurulumu. Kurulana kadar rotalar yalnızca yürüyüşle hesaplanır.",
+    };
+  }
+
+  try {
+    const res = await fetch(`${config.OTP_URL}/otp/routers/default`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    return { id: "transit", available: true, detail: `OpenTripPlanner (${config.OTP_URL})` };
+  } catch {
+    return {
+      id: "transit",
+      available: false,
+      detail: `OpenTripPlanner'a ulaşılamıyor (${config.OTP_URL})`,
+      remedy: "OTP servisinin çalıştığından emin ol.",
+    };
+  }
+}
+
 export async function getCapabilities(): Promise<Capability[]> {
   if (cached && Date.now() - cachedAt < TTL_MS) {
     return [...cached.values()];
   }
 
-  const results = await Promise.all([probeYtDlp(), probeAi()]);
+  const results = await Promise.all([probeYtDlp(), probeAi(), probeSearxng(), probeOtp()]);
   cached = new Map(results.map((c) => [c.id, c]));
   cachedAt = Date.now();
   return results;
