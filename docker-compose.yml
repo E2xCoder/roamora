@@ -1,0 +1,80 @@
+# Self-hosted research/routing infrastructure for Roamora's autonomous
+# pipeline — SearXNG (web research), Ollama (fact extraction), OpenTripPlanner
+# (transit routing). None of these are Google-dependent; all are free,
+# self-hostable services already wired into the app via SEARXNG_URL,
+# OLLAMA_BASE_URL, and OTP_URL in .env.
+#
+# What "persistence" means here, concretely — and what it does NOT mean:
+#   - restart: unless-stopped   -> survives a host reboot / Docker restart
+#   - named volumes             -> Ollama's downloaded models and SearXNG's
+#                                   config survive a container recreate
+#   - healthcheck               -> `docker compose ps` reports real status,
+#                                   not just "container exists"
+#   - OTP's graph is NOT built by this file. A graph is destination-specific
+#     (a real OSM extract + a real GTFS feed) and takes real time/bandwidth
+#     to build — see infra/README.md for the one-time build step. Without
+#     that step, the `otp` service starts but has nothing to serve.
+#
+# Start everything: docker compose up -d
+# Check status:      docker compose ps
+# Logs:              docker compose logs -f <service>
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: roamora-searxng
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081/
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider 'http://localhost:8080/search?q=health&format=json' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: roamora-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    # One-time, after first start: docker compose exec ollama ollama pull llama3.1:8b
+    # (baking the ~4.9GB model into the image itself is deliberately avoided —
+    # it would make every image rebuild re-download it; the named volume
+    # keeps the pulled model across container recreates instead.)
+
+  otp:
+    build:
+      context: ./infra/otp
+    container_name: roamora-otp
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/otp/graph_dir:/graph
+    healthcheck:
+      # No `curl -f` here: the healthcheck must NOT fail the container during
+      # legitimate graph-loading (which can take minutes) — start_period
+      # covers that window; a genuine failure after start_period means the
+      # graph load itself errored, not that it's still in progress.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/otp || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+volumes:
+  ollama_data:

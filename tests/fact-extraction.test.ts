@@ -144,4 +144,28 @@ describe("looseTextToOsmSyntax — multilingual, real extraction test cases", ()
   it("does not mistake a price or page-count range for a time range", () => {
     expect(looseTextToOsmSyntax("Tickets from 15-25 for adults")).toBeNull();
   });
+
+  it(
+    'English AM/PM — a real re-extraction of the Rijksmuseum page returned ' +
+      '"Daily, 365 days a year from 9 a.m. to 5 p.m." (hoursScope: "daily") ' +
+      "on a later live run; the parser previously had no AM/PM support at " +
+      "all and could not convert this common format",
+    () => {
+      expect(looseTextToOsmSyntax("Daily, 365 days a year from 9 a.m. to 5 p.m.")).toBe(
+        "Mo-Su 09:00-17:00"
+      );
+    }
+  );
+
+  it("does not false-positive AM/PM matching on an unrelated 'a year'/day-count phrase", () => {
+    expect(looseTextToOsmSyntax("Open 365 days a year, hours vary by season")).toBeNull();
+  });
+
+  it("handles AM/PM without periods and with minutes", () => {
+    expect(looseTextToOsmSyntax("9:30am-5:00pm")).toBe("Mo-Su 09:30-17:00");
+  });
+
+  it("handles 12pm/12am correctly (noon and midnight, not '12:00' literally added to 12)", () => {
+    expect(looseTextToOsmSyntax("12am-12pm")).toBe("Mo-Su 00:00-12:00");
+  });
 });

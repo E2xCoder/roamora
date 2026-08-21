@@ -1,0 +1,39 @@
+# Real, live-tested configuration for Roamora's self-hosted SearXNG.
+#
+# Two real problems found by actually running this, not guessed:
+#
+# 1. SearXNG's JSON API is OFF by default (only HTML). autoplan's web
+#    research needs `format=json` — without this override every search
+#    silently 403s.
+#
+# 2. Relying on a single search engine (the default DuckDuckGo-heavy setup)
+#    is fragile: sustained automated query volume in one afternoon of
+#    testing got this container's IP CAPTCHA-blocked by DuckDuckGo
+#    specifically ("SearxEngineCaptchaException"), which made every search
+#    silently return zero results — not an error, just an empty result set,
+#    which is worse because nothing in the app's logs made that obvious.
+#    Multiple keyless engines enabled below so one engine's block doesn't
+#    take down search entirely.
+
+use_default_settings: true
+
+server:
+  secret_key: "change-this-to-a-random-value" # generate: openssl rand -hex 32
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: mojeek
+    disabled: false

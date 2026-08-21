@@ -7,12 +7,15 @@ import { findPlaceSummary } from "@/server/providers/research/wikipedia-summary"
 import { searxngProvider, SearchUnavailableError } from "@/server/providers/research/searxng";
 import {
   extractFactsFromText,
-  looseTextToOsmSyntax,
+  htmlToPlainText,
   ExtractionUnavailableError,
 } from "@/server/services/fact-extraction";
+import { validateExtractedOpeningHours, isSupportedBySource } from "@/server/services/opening-hours-guard";
+import { scoreConfidence, isOfficialSource, detectStaleness, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
-import { fetchTransitMatrix } from "@/server/services/otp-matrix";
+import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS } from "@/server/services/otp-matrix";
+import { planBudgetOptimization, type BudgetOptimizationResult } from "@/server/services/budget-optimizer";
 import {
   optimizeItinerary,
   type StopInput,
@@ -50,6 +53,14 @@ export interface AutoplanRequest {
   interests?: string[];
   maxStops?: number;
   profile?: "foot" | "bike" | "car" | "transit";
+  /**
+   * Place names the user explicitly wants kept no matter what — matched
+   * case-insensitively against a discovered candidate's name. Protects a
+   * stop from budget-driven removal or substitution (see budget-optimizer.ts);
+   * has no effect if the name never turns up in discovery at all (this
+   * cannot force-add a place that OSM doesn't have).
+   */
+  mustSeeNames?: string[];
 }
 
 export interface StopProvenance {
@@ -57,9 +68,9 @@ export interface StopProvenance {
   name: string;
   category: string;
   openingHoursSource: "osm" | "web-research" | "unverified";
-  openingHoursConfidence: "medium" | "low" | "unknown";
+  openingHoursConfidence: ConfidenceLevel;
   priceSource: "web-research" | "unverified";
-  priceConfidence: "low" | "unknown";
+  priceConfidence: ConfidenceLevel;
   summarySource: "wikipedia" | "none";
   summaryText?: string;
   summaryUrl?: string;
@@ -71,6 +82,31 @@ export interface ResearchTraceEntry {
   detail: string;
 }
 
+/**
+ * Real counts behind the cost caps that bound this run — the caps exist to
+ * keep a single plan from making unbounded outbound calls, but silently
+ * hitting one and reporting nothing looked identical to "there was simply
+ * nothing to research". A user (or caller) deciding whether a plan's
+ * unverified stops are "nothing was found" vs "we ran out of budget to
+ * check" needs these numbers, not just the aggregate trace line.
+ */
+export interface ResearchMetadata {
+  webResearch: {
+    attempted: number;
+    succeeded: number;
+    skippedDueToCap: number;
+    capLimit: number;
+  };
+  transitRouting: {
+    totalPairs: number;
+    otpCallsAttempted: number;
+    otpCallsSucceeded: number;
+    skippedDueToCap: number;
+    capLimit: number;
+    fallbackUsed: boolean;
+  } | null; // null when profile !== "transit"
+}
+
 export interface AutoplanResult {
   destination: { name: string; lat: number; lng: number };
   candidatesDiscovered: number;
@@ -78,10 +114,52 @@ export interface AutoplanResult {
   itinerary: OptimizeResult;
   provenance: StopProvenance[];
   trace: ResearchTraceEntry[];
+  researchMetadata: ResearchMetadata;
+  /** Real replanning result when a budget was given and the initial itinerary exceeded it — see budget-optimizer.ts. Null when no budget was given or the first pass already fit. */
+  budgetOptimization: BudgetOptimizationResult | null;
   budgetWarning: string | null;
 }
 
 const SHORTLIST_MULTIPLIER = 2; // discover more than needed, in case some are closed that day
+
+/**
+ * Fetches and extracts hours from a second, independent search result and
+ * reports whether it agrees with the first source's resolved OSM syntax.
+ * Deliberately strict — an exact string match, not a fuzzy overlap check —
+ * since "roughly similar" hours from two sources is weaker evidence than
+ * either a real match or a real, informative conflict; being lenient here
+ * would just relabel "we didn't actually check" as "medium confidence".
+ * Any failure along the way (fetch/extract error, no hours found) reports
+ * `null` (not checked) rather than `false` (disagreement) — an unreachable
+ * second source is not evidence the first one is wrong.
+ */
+async function crossCheckAgreement(
+  placeName: string,
+  secondUrl: string,
+  firstOsmSyntax: string,
+  trace: ResearchTraceEntry[]
+): Promise<boolean | null> {
+  try {
+    const fetched = await fetchTextCapped(secondUrl);
+    if (!fetched.ok) return null;
+    const facts = await extractFactsFromText(placeName, fetched.text);
+    if (!facts) return null;
+    const guardResult = validateExtractedOpeningHours(
+      facts.facts.openingHoursText,
+      facts.facts.hoursScope,
+      htmlToPlainText(fetched.text)
+    );
+    if (guardResult.status !== "specific-hours") return null;
+    return guardResult.osmSyntax === firstOsmSyntax;
+  } catch (err) {
+    trace.push({
+      stage: `web-research-crosscheck:${placeName}`,
+      status: "failed",
+      detail: err instanceof Error ? err.message : "ikinci kaynak kontrolü başarısız",
+    });
+    return null;
+  }
+}
 
 export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   const trace: ResearchTraceEntry[] = [];
@@ -160,10 +238,12 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     });
   }
 
-  const provenance: StopProvenance[] = [];
-  const finalStops: Array<{ input: StopInput; scored: (typeof shortlist)[number] }> = [];
+  let provenance: StopProvenance[] = [];
+  let finalStops: Array<{ input: StopInput; scored: (typeof shortlist)[number] }> = [];
 
   let webResearchAttempts = 0;
+  let webResearchSucceeded = 0;
+  let webResearchSkippedDueToCap = 0;
   const MAX_WEB_RESEARCH_CALLS = 10; // cost/time control (spec §44/§54)
 
   for (const candidate of shortlist) {
@@ -187,7 +267,11 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
           earliestTime = window.open;
           latestTime = window.close;
           openingSource = "osm";
-          openingConfidence = "medium";
+          // A community-maintained structured tag, not free text pulled off
+          // a webpage — categorically stronger evidence than anything the
+          // web-research path can produce, so this never goes through the
+          // general-purpose scorer below.
+          openingConfidence = "high";
         }
         // No same-day window (e.g. only an overnight-spanning range like
         // "12:00-02:00") leaves the stop correctly unconstrained rather than
@@ -206,7 +290,12 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     const needsHoursResearch = !osmHours && searchAvailable && aiAvailable;
     const needsPriceResearch = searchAvailable && aiAvailable && p.tags.fee !== "no";
 
-    if ((needsHoursResearch || needsPriceResearch) && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
+    const wantsWebResearch = needsHoursResearch || needsPriceResearch;
+    if (wantsWebResearch && webResearchAttempts >= MAX_WEB_RESEARCH_CALLS) {
+      webResearchSkippedDueToCap++;
+    }
+
+    if (wantsWebResearch && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
       webResearchAttempts++;
       try {
         const results = await searxngProvider.searchWeb(
@@ -217,29 +306,70 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
         if (page) {
           const fetched = await fetchTextCapped(page.url);
           if (fetched.ok) {
+            const sourceText = htmlToPlainText(fetched.text);
             const facts = await extractFactsFromText(p.name, fetched.text);
             if (facts) {
-              if (facts.facts.openingHoursText && !osmHours) {
-                const osmSyntax = looseTextToOsmSyntax(facts.facts.openingHoursText);
-                if (osmSyntax) {
-                  const resolved = resolveOpeningHoursForDate(osmSyntax, tripDate);
+              const official = isOfficialSource(page.url, page.title, p.name);
+              const stale = detectStaleness(sourceText);
+              const ambiguous = !facts.facts.hoursScope || facts.facts.hoursScope === "unclear";
+
+              if (!osmHours) {
+                const guardResult = validateExtractedOpeningHours(
+                  facts.facts.openingHoursText,
+                  facts.facts.hoursScope,
+                  sourceText
+                );
+                if (guardResult.status === "specific-hours") {
+                  const resolved = resolveOpeningHoursForDate(guardResult.osmSyntax, tripDate);
                   if (resolved.status === "open" || resolved.status === "always") {
                     const window = widestWindow(resolved);
                     if (window) {
+                      // A non-official single source is weak evidence on its
+                      // own — cross-check against a second independent
+                      // result when one exists and the budget allows,
+                      // rather than reporting a confidence level no
+                      // corroboration was ever actually attempted for.
+                      let agreement: boolean | null = null;
+                      if (!official && results[1] && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
+                        webResearchAttempts++;
+                        agreement = await crossCheckAgreement(p.name, results[1].url, guardResult.osmSyntax, trace);
+                      }
                       earliestTime = window.open;
                       latestTime = window.close;
                       openingSource = "web-research";
-                      openingConfidence = "low";
+                      openingConfidence = scoreConfidence({
+                        textuallySupported: true,
+                        officialSource: official,
+                        extractionAmbiguous: ambiguous,
+                        stale,
+                        multiSourceAgreement: agreement,
+                      });
                     }
                   } else if (resolved.status === "closed") {
                     excludedAsClosed = true;
                   }
+                } else if (guardResult.status === "closed") {
+                  excludedAsClosed = true;
                 }
+                // "by-appointment" / "today-only" (never a same-day-of-week
+                // constraint without known trip-date-vs-fetch-date context,
+                // which nothing here tracks) / "unknown" all leave the stop
+                // unconstrained, same as no web-research data at all.
               }
               if (facts.facts.priceAmount != null) {
+                const priceText = `${facts.facts.priceAmount}`;
+                const priceSupported =
+                  isSupportedBySource(priceText, sourceText) ||
+                  (facts.facts.priceCurrency != null && isSupportedBySource(facts.facts.priceCurrency, sourceText));
                 estimatedCost = facts.facts.priceAmount;
                 priceSource = "web-research";
-                priceConfidence = "low";
+                priceConfidence = scoreConfidence({
+                  textuallySupported: priceSupported,
+                  officialSource: official,
+                  extractionAmbiguous: facts.facts.priceCurrency == null,
+                  stale,
+                  multiSourceAgreement: null, // price cross-checking is not implemented — one extra fetch per fact would double the already-bounded research budget
+                });
               }
             }
           }
@@ -252,6 +382,9 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
               ? err.message
               : "web araştırması başarısız";
         trace.push({ stage: `web-research:${p.name}`, status: "failed", detail });
+      }
+      if (openingSource === "web-research" || priceSource === "web-research" || excludedAsClosed) {
+        webResearchSucceeded++;
       }
     }
 
@@ -312,66 +445,137 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   });
 
   // --- 5. real routing + the EXISTING deterministic optimizer --------------
-  const points = [start, ...finalStops.map((s) => s.input)];
+  async function routeAndOptimize(
+    stopsForRoute: Array<{ input: StopInput }>,
+    stageLabel: string
+  ): Promise<{ itinerary: OptimizeResult; transitMetadata: ResearchMetadata["transitRouting"] }> {
+    const routePoints = [start, ...stopsForRoute.map((s) => s.input)];
+    let routeMatrix: Awaited<ReturnType<typeof fetchMatrix>>;
+    let routeTransitMetadata: ResearchMetadata["transitRouting"] = null;
 
-  let matrix: Awaited<ReturnType<typeof fetchMatrix>>;
-  if (profile === "transit") {
-    const transitAvailable = caps.find((c) => c.id === "transit")?.available ?? false;
-    if (transitAvailable && config.OTP_URL) {
-      const otpMatrix = await fetchTransitMatrix(points, config.OTP_URL, req.date, req.arrivalTime);
-      matrix = otpMatrix;
-      trace.push({
-        stage: "routing",
-        status: otpMatrix.source === "fallback" ? "failed" : "ok",
-        detail:
-          otpMatrix.source === "otp"
-            ? `OpenTripPlanner: ${otpMatrix.otpCalls} durak çifti için gerçek toplu taşıma rotası hesaplandı`
-            : otpMatrix.source === "otp+osrm"
-              ? `OpenTripPlanner: ${otpMatrix.otpCalls - otpMatrix.otpFailures}/${otpMatrix.otpCalls} çift gerçek toplu taşıma verisiyle, kalanı yürüyüşle`
-              : "OpenTripPlanner hiçbir çift için yanıt vermedi, yürüyüş mesafesi kullanıldı",
-      });
+    if (profile === "transit") {
+      const transitAvailable = caps.find((c) => c.id === "transit")?.available ?? false;
+      if (transitAvailable && config.OTP_URL) {
+        const otpMatrix = await fetchTransitMatrix(routePoints, config.OTP_URL, req.date, req.arrivalTime);
+        routeMatrix = otpMatrix;
+        routeTransitMetadata = {
+          totalPairs: otpMatrix.totalPairs,
+          otpCallsAttempted: otpMatrix.otpCalls,
+          otpCallsSucceeded: otpMatrix.otpSucceeded,
+          skippedDueToCap: otpMatrix.skippedDueToCap,
+          capLimit: OTP_MAX_CALLS,
+          fallbackUsed: otpMatrix.fallbackUsed,
+        };
+        trace.push({
+          stage: stageLabel,
+          status: otpMatrix.source === "fallback" ? "failed" : "ok",
+          detail:
+            otpMatrix.source === "otp"
+              ? `OpenTripPlanner: ${otpMatrix.otpCalls} durak çifti için gerçek toplu taşıma rotası hesaplandı`
+              : otpMatrix.source === "otp+osrm"
+                ? `OpenTripPlanner: ${otpMatrix.otpSucceeded}/${otpMatrix.totalPairs} çift gerçek toplu taşıma verisiyle (${otpMatrix.skippedDueToCap} çift limit nedeniyle denenmedi), kalanı yürüyüşle`
+                : "OpenTripPlanner hiçbir çift için yanıt vermedi, yürüyüş mesafesi kullanıldı",
+        });
+      } else {
+        trace.push({
+          stage: stageLabel,
+          status: "failed",
+          detail:
+            caps.find((c) => c.id === "transit")?.remedy ??
+            "OTP_URL yapılandırılmamış, yürüyüş mesafesi kullanıldı",
+        });
+        routeMatrix = await fetchMatrix(routePoints, "foot");
+      }
     } else {
+      routeMatrix = await fetchMatrix(routePoints, profile);
       trace.push({
-        stage: "routing",
-        status: "failed",
-        detail:
-          caps.find((c) => c.id === "transit")?.remedy ??
-          "OTP_URL yapılandırılmamış, yürüyüş mesafesi kullanıldı",
+        stage: stageLabel,
+        status: routeMatrix.source === "osrm" ? "ok" : "failed",
+        detail: routeMatrix.source === "osrm" ? "OSRM matrisi hesaplandı" : "OSRM yanıt vermedi, kuş uçuşu kullanıldı",
       });
-      matrix = await fetchMatrix(points, "foot");
     }
-  } else {
-    matrix = await fetchMatrix(points, profile);
+
+    const routeItinerary = optimizeItinerary(
+      {
+        stops: stopsForRoute.map((s) => s.input),
+        dayStart: req.arrivalTime,
+        dayEnd: req.departureTime,
+        start,
+        end: req.endLocation,
+      },
+      routeMatrix
+    );
+
     trace.push({
-      stage: "routing",
-      status: matrix.source === "osrm" ? "ok" : "failed",
-      detail: matrix.source === "osrm" ? "OSRM matrisi hesaplandı" : "OSRM yanıt vermedi, kuş uçuşu kullanıldı",
+      stage: `${stageLabel}:optimize`,
+      status: routeItinerary.feasible ? "ok" : "failed",
+      detail: routeItinerary.feasible
+        ? `${routeItinerary.stops.length} durak, ${(routeItinerary.totalDistanceMeters / 1000).toFixed(1)} km`
+        : `${routeItinerary.conflicts.length} çakışma tespit edildi`,
     });
+
+    return { itinerary: routeItinerary, transitMetadata: routeTransitMetadata };
   }
 
-  const itinerary = optimizeItinerary(
-    {
-      stops: finalStops.map((s) => s.input),
-      dayStart: req.arrivalTime,
-      dayEnd: req.departureTime,
-      start,
-      end: req.endLocation,
+  let { itinerary, transitMetadata } = await routeAndOptimize(finalStops, "routing");
+
+  // --- 6. real budget replanning, not a passive warning --------------------
+  let budgetOptimization: BudgetOptimizationResult | null = null;
+  if (req.budget != null) {
+    const mustSeeIds = new Set(
+      finalStops
+        .filter((s) =>
+          (req.mustSeeNames ?? []).some((n) => s.input.name.toLowerCase().includes(n.toLowerCase()))
+        )
+        .map((s) => s.input.id)
+    );
+    const { keptStops, result } = planBudgetOptimization(finalStops, shortlist, req.budget, mustSeeIds);
+    budgetOptimization = result;
+
+    if (result.applied) {
+      trace.push({
+        stage: "budget",
+        status: result.satisfied ? "ok" : "failed",
+        detail: `${result.reason} — ${result.originalCost} ${req.currency ?? ""} → ${result.optimizedCost} ${req.currency ?? ""}`,
+      });
+
+      if (result.removedStops.length > 0 || result.replacedStops.length > 0) {
+        finalStops = keptStops;
+        provenance = provenance.filter((p) => finalStops.some((s) => s.input.id === p.stopId));
+        for (const r of result.replacedStops) {
+          const added = keptStops.find((s) => s.input.id === r.addedId);
+          if (added) {
+            provenance.push({
+              stopId: added.input.id,
+              name: added.input.name,
+              category: added.scored.category,
+              openingHoursSource: "unverified",
+              openingHoursConfidence: "unknown",
+              priceSource: "unverified", // free by construction (isFreeCandidate), but not independently re-verified — reported as unknown rather than claiming a checked "free" fact
+              priceConfidence: "unknown",
+              summarySource: "none",
+            });
+          }
+        }
+        ({ itinerary, transitMetadata } = await routeAndOptimize(finalStops, "budget-reroute"));
+      }
+    }
+  }
+
+  const budgetWarning =
+    budgetOptimization && !budgetOptimization.satisfied
+      ? `Bütçe (${req.budget} ${req.currency ?? ""}) tüm zorunlu/kilitli duraklar korunarak karşılanamadı — ulaşılabilir minimum maliyet: ${budgetOptimization.minimumFeasibleCost} ${req.currency ?? ""}.`
+      : null;
+
+  const researchMetadata: ResearchMetadata = {
+    webResearch: {
+      attempted: webResearchAttempts,
+      succeeded: webResearchSucceeded,
+      skippedDueToCap: webResearchSkippedDueToCap,
+      capLimit: MAX_WEB_RESEARCH_CALLS,
     },
-    matrix
-  );
-
-  trace.push({
-    stage: "optimize",
-    status: itinerary.feasible ? "ok" : "failed",
-    detail: itinerary.feasible
-      ? `${itinerary.stops.length} durak, ${(itinerary.totalDistanceMeters / 1000).toFixed(1)} km`
-      : `${itinerary.conflicts.length} çakışma tespit edildi`,
-  });
-
-  let budgetWarning: string | null = null;
-  if (req.budget != null && itinerary.costKnown && itinerary.totalCost > req.budget) {
-    budgetWarning = `Tahmini maliyet (${itinerary.totalCost} ${req.currency ?? ""}) bütçeyi (${req.budget} ${req.currency ?? ""}) aşıyor.`;
-  }
+    transitRouting: transitMetadata,
+  };
 
   return {
     destination: { name: destGeo.displayName, ...center },
@@ -380,6 +584,8 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     itinerary,
     provenance,
     trace,
+    researchMetadata,
+    budgetOptimization,
     budgetWarning,
   };
 }

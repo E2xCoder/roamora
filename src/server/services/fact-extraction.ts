@@ -60,8 +60,27 @@ export function htmlToPlainText(html: string): string {
     .trim();
 }
 
+/**
+ * How the source text stated its hours — asked for explicitly rather than
+ * inferred from the absence of a day name in `openingHoursText`.
+ *
+ * The model routinely strips the qualifying word along with the day when it
+ * extracts just the hours ("täglich von 9 bis 17 Uhr" -> "9 bis 17 Uhr",
+ * "Ouvert aujourd'hui 09:00 - 00:00" -> "09:00 - 00:00") — by the time
+ * `openingHoursText` reaches any downstream code, "every day" and "today
+ * only" are textually indistinguishable. Those are not the same claim: a
+ * museum's hours stated for "today" may differ from its hours on other days
+ * (a holiday, a special exhibition, a reduced-hours weekday), so treating
+ * every day-less extraction as "daily" — which an earlier version of this
+ * module did — is a real, if usually harmless, guess. Asking the model to
+ * classify which case it actually saw removes the guess.
+ */
+const HOURS_SCOPES = ["daily", "today", "specific-days", "closed", "by-appointment", "unclear"] as const;
+export type HoursScope = (typeof HOURS_SCOPES)[number];
+
 const factsSchema = z.object({
   openingHoursText: z.string().max(200).nullable(),
+  hoursScope: z.enum(HOURS_SCOPES).nullable(),
   priceAmount: z.number().min(0).max(100_000).nullable(),
   priceCurrency: z.string().max(6).nullable(),
   /** True only when the model is confident the page discusses THIS place. */
@@ -129,6 +148,7 @@ ${trimmed}
 Return ONLY a JSON object with this exact shape, no other text:
 {
   "openingHoursText": "<the opening hours as literally stated, e.g. 'Mon-Fri 9:00-17:00', or null if not found>",
+  "hoursScope": "<one of: 'daily' (text says every day / daily / täglich / tous les jours / codziennie / her gün), 'today' (text says only 'today' / 'aujourd'hui' / 'heute' / 'bugün', with no claim about other days), 'specific-days' (text names particular days or a day range), 'closed' (text says this place is closed / permanently closed / closed for renovation), 'by-appointment' (text says visits are by appointment / on request only, no fixed hours), 'unclear' (hours are mentioned but which of the above applies is not clear), or null if no hours information was found at all>",
   "priceAmount": <numeric ticket/entry price if stated, or null>,
   "priceCurrency": "<currency code or symbol as stated, or null>",
   "aboutThisPlace": <true only if this page text is actually about "${placeName}", false otherwise>
@@ -160,7 +180,11 @@ Do not guess. If a fact is not clearly stated in the text, use null for it.`;
   const validated = factsSchema.safeParse(parsedJson);
   if (!validated.success) return null;
   if (!validated.data.aboutThisPlace) return null;
-  if (validated.data.openingHoursText == null && validated.data.priceAmount == null) {
+  if (
+    validated.data.openingHoursText == null &&
+    validated.data.hoursScope == null &&
+    validated.data.priceAmount == null
+  ) {
     return null; // nothing useful extracted
   }
 
@@ -325,6 +349,7 @@ function findTimeRanges(text: string): TimeRange[] {
     const ch = Number(m[4]);
     const cm = Number(m[5] ?? m[6] ?? 0);
     if (oh > 23 || ch > 23 || om > 59 || cm > 59) continue;
+    if (oh === ch && om === cm) continue; // "09:00-09:00" — zero-duration, malformed, not a real window
     ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:${pad2(om)}`, close: `${pad2(ch)}:${pad2(cm)}` });
   }
 
@@ -337,12 +362,41 @@ function findTimeRanges(text: string): TimeRange[] {
     const oh = Number(m[1]);
     const ch = Number(m[2]);
     if (oh > 23 || ch > 23) continue;
+    if (oh === ch) continue; // "9-9 Uhr" — zero-duration, malformed
     const overlapsColonMatch = ranges.some((r) => r.index < m!.index + m![0].length && m!.index < r.end);
     if (overlapsColonMatch) continue;
     ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:00`, close: `${pad2(ch)}:00` });
   }
 
+  // "9 a.m. to 5 p.m." / "9am-5pm" / "9:30 AM - 5:00 PM" — English AM/PM,
+  // real-world coverage gap found live: a real model extraction for the
+  // Rijksmuseum returned exactly "Daily, 365 days a year from 9 a.m. to 5
+  // p.m." with hoursScope correctly "daily", but with no AM/PM support this
+  // parser could not convert the time at all and the guard correctly
+  // refused to guess rather than mishandle it — closing the gap instead of
+  // leaving a common, real format permanently unusable.
+  const reAmPm = /(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?\s*(?:to|-|–|—)\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/gi;
+  while ((m = reAmPm.exec(text))) {
+    const oh12 = Number(m[1]);
+    const om = Number(m[2] ?? 0);
+    const ch12 = Number(m[4]);
+    const cm = Number(m[5] ?? 0);
+    if (oh12 < 1 || oh12 > 12 || ch12 < 1 || ch12 > 12 || om > 59 || cm > 59) continue;
+    const oh = to24Hour(oh12, m[3]);
+    const ch = to24Hour(ch12, m[6]);
+    if (oh === ch && om === cm) continue; // zero-duration, malformed
+    const overlapsExisting = ranges.some((r) => r.index < m!.index + m![0].length && m!.index < r.end);
+    if (overlapsExisting) continue;
+    ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:${pad2(om)}`, close: `${pad2(ch)}:${pad2(cm)}` });
+  }
+
   return ranges.sort((a, b) => a.index - b.index);
+}
+
+function to24Hour(hour12: number, ampm: string): number {
+  const isPm = ampm.toLowerCase() === "p";
+  if (hour12 === 12) return isPm ? 12 : 0;
+  return isPm ? hour12 + 12 : hour12;
 }
 
 /**
@@ -360,6 +414,46 @@ function findTimeRanges(text: string): TimeRange[] {
  */
 function isPureConnector(s: string): boolean {
   return /^[\s.]*[-–—][\s.]*$/.test(s);
+}
+
+const OSM_DAY_ORDER: OsmDay[] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+/** Expands "Tu-Fr" -> [Tu,We,Th,Fr] or a single "Mo" -> [Mo]. */
+function expandDaySpec(spec: string): OsmDay[] {
+  const [start, end] = spec.split("-") as [OsmDay, OsmDay | undefined];
+  if (!end) return [start];
+  const startIdx = OSM_DAY_ORDER.indexOf(start);
+  const endIdx = OSM_DAY_ORDER.indexOf(end);
+  const days: OsmDay[] = [];
+  let i = startIdx;
+  while (true) {
+    days.push(OSM_DAY_ORDER[i]);
+    if (i === endIdx) break;
+    i = (i + 1) % 7;
+  }
+  return days;
+}
+
+/**
+ * Rejects the whole result if the same day appears in two groups with
+ * different hours — e.g. a model that emitted both "Mo-Fr 09:00-17:00" and,
+ * elsewhere in the same string, "Mo 10:00-14:00" for what should be one
+ * schedule. That is not a real venue's hours (nothing opens two different
+ * schedules on the same calendar day); it is a sign the extraction merged
+ * text from two unrelated parts of the page. A contradictory constraint fed
+ * to the optimizer is worse than a missing one.
+ */
+function hasContradiction(parts: Array<{ spec: string; open: string; close: string }>): boolean {
+  const seen = new Map<OsmDay, string>();
+  for (const part of parts) {
+    for (const day of expandDaySpec(part.spec)) {
+      const key = `${part.open}-${part.close}`;
+      const existing = seen.get(day);
+      if (existing && existing !== key) return true;
+      seen.set(day, key);
+    }
+  }
+  return false;
 }
 
 export function looseTextToOsmSyntax(text: string): string | null {
@@ -396,7 +490,7 @@ export function looseTextToOsmSyntax(text: string): string | null {
   }
 
   const usedTimeIndices = new Set<number>();
-  const parts: string[] = [];
+  const parts: Array<{ spec: string; open: string; close: string }> = [];
   for (let g = 0; g < groups.length; g++) {
     const group = groups[g];
     const boundary = g + 1 < groups.length ? groups[g + 1].start : trimmed.length;
@@ -404,8 +498,11 @@ export function looseTextToOsmSyntax(text: string): string | null {
     if (timeIdx === -1) return null; // a day group with no hours right after it — refuse rather than guess
     usedTimeIndices.add(timeIdx);
     const t = times[timeIdx];
-    parts.push(`${group.spec} ${t.open}-${closeFor(t.close)}`);
+    parts.push({ spec: group.spec, open: t.open, close: closeFor(t.close) });
   }
 
-  return parts.length > 0 ? parts.join("; ") : null;
+  if (parts.length === 0) return null;
+  if (hasContradiction(parts)) return null;
+
+  return parts.map((p) => `${p.spec} ${p.open}-${p.close}`).join("; ");
 }
