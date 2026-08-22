@@ -14,6 +14,10 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Prisma client output.
     "src/generated/**",
+    // scripts/provision-transit.ts's own downloaded reference data (a
+    // third-party repo's real content, including its own JS files) — not
+    // this project's code.
+    ".cache/**",
   ]),
 
   {
