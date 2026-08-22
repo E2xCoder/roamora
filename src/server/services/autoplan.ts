@@ -104,6 +104,17 @@ export interface AutoplanRequest {
    * actually have.
    */
   foodPreferences?: string[];
+  /**
+   * Multiplies raw routing time to account for crossings, photos, crowds,
+   * wrong turns — passed straight through to the existing optimizer
+   * (itinerary-optimizer.ts already accepts this; autoplan.ts never wired
+   * it through before). Used by trip-options.ts (spec §Priority 9) to make
+   * "Max Experience" assume a brisker real pace and "Relaxed" a more
+   * generous one, without touching the optimizer itself.
+   */
+  realismFactor?: number;
+  /** Set false to skip the Priority-5 hidden-gem stage entirely — used by trip-options.ts's "Relaxed" pace to keep the day less packed. Defaults to true (unchanged existing behavior) when unset. */
+  includeHiddenGems?: boolean;
 }
 
 export interface StopProvenance {
@@ -991,6 +1002,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
         dayEnd: effectiveDayEnd,
         start,
         end: req.endLocation,
+        realismFactor: req.realismFactor,
       },
       routeMatrix
     );
@@ -1030,7 +1042,9 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     ...[...itinerary.stops].sort((a, b) => a.order - b.order).map((s) => ({ lat: s.lat, lng: s.lng })),
     ...(req.endLocation ? [req.endLocation] : []),
   ];
-  if (orderedRoutePoints.length < 2) {
+  if (req.includeHiddenGems === false) {
+    hiddenGems = { status: "skipped", found: [], reason: "gizli hazine keşfi bu plan için devre dışı bırakıldı" };
+  } else if (orderedRoutePoints.length < 2) {
     hiddenGems = { status: "skipped", found: [], reason: "rota için yeterli durak yok" };
   } else {
     const usedIds = new Set(finalStops.map((s) => s.input.id));
@@ -1223,6 +1237,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
         dayEnd: effectiveDayEnd,
         start,
         end: req.endLocation,
+        realismFactor: req.realismFactor,
       },
       lastMatrix
     );
