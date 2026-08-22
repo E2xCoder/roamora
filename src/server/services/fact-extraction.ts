@@ -339,15 +339,25 @@ function closeFor(close: string): string {
 function findTimeRanges(text: string): TimeRange[] {
   const ranges: TimeRange[] = [];
 
-  // "09:00 - 18:00", "9:00-18:00", "9h00 à 21h00" (colon or "h" delimiter on
-  // both sides of the range).
-  const reColon = /(\d{1,2})(?::(\d{2})|h(\d{2})?)\s*[-–—]\s*(\d{1,2})(?::(\d{2})|h(\d{2})?)/g;
+  // "09:00 - 18:00", "9:00-18:00", "9h00 à 21h00", "daily 9:00 to 22:00",
+  // "Open daily 9 to 17h" — colon or "h" delimiter, dash/"to"/"bis" separator.
+  // Each side's delimiter is independently optional (real case: "9 to 17h"
+  // has a bare "9" on one side and an "h"-marked "17h" on the other) but at
+  // least one side must carry a real time marker — requiring that is what
+  // stops a bare number range like "15-25" (a price, a page count) from
+  // ever being read as a time, which neither side of has any hour marker at
+  // all.
+  const reColon =
+    /(\d{1,2})(:(\d{2})|h(\d{2})?)?\s*(?:-|–|—|to|bis)\s*(\d{1,2})(:(\d{2})|h(\d{2})?)?/gi;
   let m: RegExpExecArray | null;
   while ((m = reColon.exec(text))) {
+    const openHasMarker = m[2] !== undefined;
+    const closeHasMarker = m[6] !== undefined;
+    if (!openHasMarker && !closeHasMarker) continue; // neither side looks like a time — likely an unrelated number range
     const oh = Number(m[1]);
-    const om = Number(m[2] ?? m[3] ?? 0);
-    const ch = Number(m[4]);
-    const cm = Number(m[5] ?? m[6] ?? 0);
+    const om = openHasMarker ? Number(m[3] ?? m[4] ?? 0) : 0;
+    const ch = Number(m[5]);
+    const cm = closeHasMarker ? Number(m[7] ?? m[8] ?? 0) : 0;
     if (oh > 23 || ch > 23 || om > 59 || cm > 59) continue;
     if (oh === ch && om === cm) continue; // "09:00-09:00" — zero-duration, malformed, not a real window
     ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:${pad2(om)}`, close: `${pad2(ch)}:${pad2(cm)}` });

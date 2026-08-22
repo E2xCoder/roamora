@@ -146,6 +146,30 @@ describe("looseTextToOsmSyntax — multilingual, real extraction test cases", ()
   });
 
   it(
+    'English "to" separator — real extractions over the Anne Frank House and Rijksmuseum ' +
+      'official pages returned "daily 9:00 to 22:00" and "Open daily 9 to 17h" respectively; ' +
+      'the parser only recognised "-"/"bis" as range separators, never the word "to", so both ' +
+      "correct, textually-supported extractions were silently rejected as unparseable",
+    () => {
+      expect(looseTextToOsmSyntax("daily 9:00 to 22:00")).toBe("Mo-Su 09:00-22:00");
+      expect(looseTextToOsmSyntax("Open daily 9 to 17h")).toBe("Mo-Su 09:00-17:00");
+    }
+  );
+
+  it(
+    "accepts a range where only one side carries an explicit time marker, as long as at " +
+      'least one side does (the other real half of the "9 to 17h" shape)',
+    () => {
+      expect(looseTextToOsmSyntax("9 to 17:00")).toBe("Mo-Su 09:00-17:00");
+    }
+  );
+
+  it('still rejects a bare "N to M" with no time marker on either side, same as the dash-separated price-range case', () => {
+    expect(looseTextToOsmSyntax("9 to 17")).toBeNull();
+    expect(looseTextToOsmSyntax("rooms available from 5 to 12")).toBeNull();
+  });
+
+  it(
     'English AM/PM — a real re-extraction of the Rijksmuseum page returned ' +
       '"Daily, 365 days a year from 9 a.m. to 5 p.m." (hoursScope: "daily") ' +
       "on a later live run; the parser previously had no AM/PM support at " +

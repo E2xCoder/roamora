@@ -107,8 +107,19 @@ export function isOfficialSource(url: string, resultTitle: string, placeName: st
   // domain omits (real case: "Brama Poznania ICHOT" -> hostname
   // "bramapoznania.pl" — the domain is a genuine substring of the *place*
   // name, not the other way around, which a one-directional check missed).
+  //
+  // Coverage-ratio guarded: an absolute length minimum alone let a short,
+  // generic word falsely pass as "the place's own domain" purely by being a
+  // prefix — real case: "Stary Rynek Poznań" ("Old Market Square") matched
+  // stary.at (an unrelated Austrian roofing company) because "stary" (5
+  // chars, Polish for "old") is the first 5 characters of the place's slug.
+  // Requiring the shorter string to cover at least half the longer one
+  // keeps the legitimate Brama Poznania case (13/19 chars, 68%) while
+  // rejecting this one (5/16 chars, 31%).
   const [shorter, longer] = slug.length <= hostSlug.length ? [slug, hostSlug] : [hostSlug, slug];
-  if (shorter.length >= 4 && longer.includes(shorter)) return true;
+  if (shorter.length >= 4 && shorter.length / longer.length >= 0.5 && longer.includes(shorter)) {
+    return true;
+  }
 
   return OFFICIAL_TITLE_WORDS.test(resultTitle);
 }

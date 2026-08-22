@@ -299,10 +299,18 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       webResearchAttempts++;
       try {
         const results = await searxngProvider.searchWeb(
-          `${p.name} ${req.destination} opening hours price`,
-          3
+          `"${p.name}" ${req.destination} official opening hours price`,
+          5
         );
-        const page = results[0];
+        // Prefer the first result that looks like the place's own site over
+        // blindly taking the top-ranked result — measured live against 15
+        // real candidates, the literal top hit was wrong far more often than
+        // not (an unrelated company sharing an abbreviation, a Wikipedia
+        // disambiguation stub, a generic city-tourism blog), while a real
+        // official page was frequently sitting a few positions down,
+        // unused. Falls back to the top result when nothing looks official,
+        // rather than skipping research entirely.
+        const page = results.find((r) => isOfficialSource(r.url, r.title, p.name)) ?? results[0];
         if (page) {
           const fetched = await fetchTextCapped(page.url);
           if (fetched.ok) {
@@ -330,9 +338,10 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
                       // rather than reporting a confidence level no
                       // corroboration was ever actually attempted for.
                       let agreement: boolean | null = null;
-                      if (!official && results[1] && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
+                      const secondSource = results.find((r) => r.url !== page.url);
+                      if (!official && secondSource && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
                         webResearchAttempts++;
-                        agreement = await crossCheckAgreement(p.name, results[1].url, guardResult.osmSyntax, trace);
+                        agreement = await crossCheckAgreement(p.name, secondSource.url, guardResult.osmSyntax, trace);
                       }
                       earliestTime = window.open;
                       latestTime = window.close;

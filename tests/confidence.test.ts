@@ -142,6 +142,22 @@ describe("isOfficialSource", () => {
     ).toBe(false);
   });
 
+  it(
+    "rejects a short generic word matching only a small prefix of a longer place name " +
+      '(regression: a live run had "Stary Rynek Poznań" — "Old Market Square" — match ' +
+      '"stary.at", an unrelated Austrian roofing company, because "stary" (Polish for ' +
+      '"old") is literally the first 5 of the slug\'s 16 characters. The bidirectional ' +
+      "check's absolute length minimum alone wasn't enough; it also needs the shorter " +
+      "string to cover a real proportion of the longer one, not just meet a floor.)",
+    () => {
+      expect(isOfficialSource("https://stary.at/", "Stary - Dach, Fassade, Bad", "Stary Rynek Poznań")).toBe(false);
+    }
+  );
+
+  it("still recognizes a short domain that covers most of a short place name (not just Brama Poznania's longer case)", () => {
+    expect(isOfficialSource("https://rijksmuseum.nl/en", "Home - Rijksmuseum", "Rijksmuseum")).toBe(true);
+  });
+
   it("returns false for a malformed URL rather than throwing", () => {
     expect(isOfficialSource("not a url", "Rijksmuseum Official", "Rijksmuseum")).toBe(false);
   });
