@@ -28,6 +28,8 @@ import { fetchMatrix } from "@/server/services/osrm-matrix";
 import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS } from "@/server/services/otp-matrix";
 import { planBudgetOptimization, type BudgetOptimizationResult } from "@/server/services/budget-optimizer";
 import { findHiddenGemsNearCorridor } from "@/server/services/hidden-gem";
+import { fetchDailyForecast, isBadWeatherDay, type WeatherForecast } from "@/server/providers/research/weather";
+import { applyWeatherWeights, isOutdoorCategory } from "@/server/services/weather-routing";
 import {
   optimizeItinerary,
   type StopInput,
@@ -173,6 +175,17 @@ export interface HiddenGemResult {
   reason?: string;
 }
 
+/** Real weather influence on routing (spec §Priority 6) — not a forecast display. */
+export interface WeatherResult {
+  status: "found" | "unavailable";
+  forecast?: WeatherForecast;
+  /** Whether the forecast actually met the bad-weather threshold (see isBadWeatherDay). */
+  badWeatherDay: boolean;
+  /** True exactly when badWeatherDay caused a real category-weight change to the shortlist. */
+  categoriesAdjusted: boolean;
+  reason?: string;
+}
+
 /**
  * Real counts behind the cost caps that bound this run — the caps exist to
  * keep a single plan from making unbounded outbound calls, but silently
@@ -226,6 +239,8 @@ export interface AutoplanResult {
   localFood: LocalFoodResult;
   /** Route-aware hidden-gem engine result (spec §Priority 5) — real places found near the actual route corridor and re-inserted into the optimizer, not appended. */
   hiddenGems: HiddenGemResult;
+  /** Real weather forecast and whether it actually changed category weighting (spec §Priority 6). */
+  weather: WeatherResult;
   departureSafety: DepartureSafetyResult;
   /** Real robustness check: re-runs the same deterministic optimizer, same real matrix, with the start time pushed back by each increment. No new network calls. */
   delaySimulation: DelaySimulationResult[];
@@ -304,6 +319,23 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
 
   const start = req.startLocation ?? { ...center, name: req.destination };
 
+  // --- 1b. weather (spec §Priority 6) — computed early so it can actually
+  // change which candidates get shortlisted, not just be displayed -------
+  let weather: WeatherResult;
+  const forecast = await fetchDailyForecast(center.lat, center.lng, req.date).catch(() => null);
+  if (!forecast) {
+    weather = { status: "unavailable", badWeatherDay: false, categoriesAdjusted: false, reason: "tarih tahmin ufkunun dışında ya da servis yanıt vermedi" };
+    trace.push({ stage: "weather", status: "skipped", detail: weather.reason! });
+  } else {
+    const badWeatherDay = isBadWeatherDay(forecast);
+    weather = { status: "found", forecast, badWeatherDay, categoriesAdjusted: badWeatherDay };
+    trace.push({
+      stage: "weather",
+      status: "ok",
+      detail: `${forecast.condition} (${forecast.precipitationProbability ?? "?"}% yağış ihtimali, ${forecast.temperatureMinC ?? "?"}–${forecast.temperatureMaxC ?? "?"}°C)${badWeatherDay ? " — kötü hava, kapalı mekan kategorileri önceliklendirildi" : ""}`,
+    });
+  }
+
   // Computed early (not just at routing time) because restaurant meal-window
   // selection needs the real effective end-of-day before the optimizer runs.
   const departureBufferMinutes = Math.max(0, req.departureBufferMinutes ?? 0);
@@ -342,7 +374,12 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
 
   // --- 3. score, classify, prune -------------------------------------------
   const scored = scoreCandidates(discovered, center);
-  const weights = Object.fromEntries((req.interests ?? []).map((cat) => [cat, 3]));
+  const baseWeights = Object.fromEntries((req.interests ?? []).map((cat) => [cat, 3]));
+  // Real routing-decision change on a bad-weather day, not a cosmetic
+  // forecast: indoor categories are weighted up and outdoor ones down
+  // BEFORE the shortlist is built, on top of whatever the user's own
+  // stated interests already weighted — see weather-routing.ts.
+  const weights = applyWeatherWeights(baseWeights, [...new Set(scored.map((c) => c.category))], weather.badWeatherDay);
   const shortlist = pruneAndDiversify(scored, maxStops * SHORTLIST_MULTIPLIER, weights);
   // Every OSM restaurant candidate, not just the ones that made the general
   // attraction shortlist — pruneAndDiversify's category round-robin can
@@ -997,7 +1034,11 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     hiddenGems = { status: "skipped", found: [], reason: "rota için yeterli durak yok" };
   } else {
     const usedIds = new Set(finalStops.map((s) => s.input.id));
-    const gemFindings = findHiddenGemsNearCorridor(scored, orderedRoutePoints, usedIds);
+    // Bad weather also rules out an outdoor hidden gem specifically — the
+    // same real routing-decision change as the shortlist weighting above,
+    // applied to this later, separate discovery stage too.
+    const gemCandidatePool = weather.badWeatherDay ? scored.filter((c) => !isOutdoorCategory(c.category)) : scored;
+    const gemFindings = findHiddenGemsNearCorridor(gemCandidatePool, orderedRoutePoints, usedIds);
 
     const addedGems: HiddenGemFound[] = [];
     for (const finding of gemFindings) {
@@ -1221,6 +1262,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     restaurant,
     localFood,
     hiddenGems,
+    weather,
     departureSafety,
     delaySimulation,
     fragileAtMinutes,

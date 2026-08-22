@@ -51,6 +51,9 @@ const schema = z.object({
   WIKIVOYAGE_URL: z.string().default("https://en.wikivoyage.org/w/api.php"),
   WAYMARKED_URL: z.string().default("https://hiking.waymarkedtrails.org/api/v1"),
 
+  // WEATHER — free, keyless, no self-hosting required (spec §Priority 6) ---
+  OPEN_METEO_URL: z.string().default("https://api.open-meteo.com/v1/forecast"),
+
   // STORAGE ----------------------------------------------------------------
   STORAGE_PROVIDER: z.enum(["local"]).default("local"),
   STORAGE_LOCAL_PATH: z.string().default("./storage"),
