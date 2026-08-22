@@ -1,19 +1,63 @@
 # Real, live-tested configuration for Roamora's self-hosted SearXNG.
 #
-# Two real problems found by actually running this, not guessed:
+# Problems found by actually running this, not guessed:
 #
 # 1. SearXNG's JSON API is OFF by default (only HTML). autoplan's web
 #    research needs `format=json` — without this override every search
 #    silently 403s.
 #
 # 2. Relying on a single search engine (the default DuckDuckGo-heavy setup)
-#    is fragile: sustained automated query volume in one afternoon of
-#    testing got this container's IP CAPTCHA-blocked by DuckDuckGo
-#    specifically ("SearxEngineCaptchaException"), which made every search
-#    silently return zero results — not an error, just an empty result set,
-#    which is worse because nothing in the app's logs made that obvious.
-#    Multiple keyless engines enabled below so one engine's block doesn't
-#    take down search entirely.
+#    is fragile: sustained automated query volume got this container's IP
+#    CAPTCHA-blocked by DuckDuckGo specifically ("SearxEngineCaptchaException"),
+#    which made every search silently return zero results — not an error,
+#    just an empty result set, which is worse because nothing in the app's
+#    logs made that obvious. Multiple keyless engines enabled below so one
+#    engine's block doesn't take down search entirely.
+#
+# 3. Live-observed on 2026-08-22 (docker logs + direct `unresponsive_engines`
+#    checks against a running container, three different real queries):
+#    - `google cse` is enabled by `use_default_settings: true` but has no
+#      `api_key`/`api_id` configured (it's Google's paid Custom Search API,
+#      not the free scraped "google" engine) — it can never succeed without
+#      billing we're not setting up, and every failed attempt gets it
+#      "Suspended: too many requests", polluting unresponsive_engines with
+#      permanent noise on every single query. Disabled explicitly.
+#    - `startpage` was "Suspended: CAPTCHA" on every one of three real,
+#      unrelated queries in a row — a known-unreliable engine from
+#      datacenter/residential IPs, not a transient blip. Disabled explicitly
+#      rather than let it inflate the "down" count every query.
+#    - `crowdview` (a free, keyless community search proxy) was tried as a
+#      real diversity candidate — a direct probe to its endpoint initially
+#      returned results for a generic word, but SearXNG's own /stats page
+#      after real travel queries showed it responding fast (0.4s) with an
+#      empty result count on every one of them: its index has no real
+#      coverage for this app's kind of query. NOT an error (never appears in
+#      unresponsive_engines), just genuinely useless here — removed again.
+#    - `mojeek` (already enabled before this pass) was assumed to be a
+#      working fallback with zero actual verification. SearXNG's /stats page
+#      shows the same pattern: 0.1s response, empty result count, on every
+#      real query — direct curl confirms mojeek 403s a bare "curl/x.x" User
+#      -Agent but returns 200 for a browser UA, so SearXNG's request is
+#      reaching it, yet it silently yields nothing through the engine's own
+#      parser. Left enabled (harmless — fails fast, doesn't slow searches
+#      down) but must NOT be counted as real fallback capacity until this is
+#      understood further.
+#    - DuckDuckGo's HTML endpoint (html.duckduckgo.com) was probed directly
+#      and is unreachable (connection failure, not just the API) — confirms
+#      the DDG block is network-level, so enabling SearXNG's `duckduckgo web`
+#      variant as a workaround would not help and was NOT added.
+#    `duckduckgo` and `brave` are left enabled despite being suspended at
+#    observation time: their suspension is self-inflicted from this
+#    project's own testing volume and both structurally work (unlike
+#    google cse) — SearXNG lifts the suspension on its own after its
+#    internal cooldown, so disabling them would lose real fallback capacity
+#    once they recover.
+#
+#    Honest bottom line after this pass: real, currently-working general-web
+#    diversity in this deployment is `bing` + `qwant` only. `duckduckgo` and
+#    `brave` should recover once their cooldowns expire. `mojeek` is enabled
+#    but unexplained-empty; `google cse` and `startpage` are structurally
+#    broken here and are disabled rather than left as noise.
 
 use_default_settings: true
 
@@ -29,6 +73,16 @@ search:
 engines:
   - name: duckduckgo
     disabled: false
+    # html.duckduckgo.com is confirmed unreachable from this network (direct
+    # curl to it hangs to a bare connection timeout, not a fast rejection) —
+    # live-measured on 2026-08-22: SearXNG's default 3s engine timeout was
+    # still making the whole /search response take ~8s, which blew past the
+    # app's own 5s health-probe timeout and made it treat SearXNG as
+    # completely down, dropping web research to 0 attempts — worse than
+    # doing nothing. A short timeout here makes SearXNG give up on a route
+    # that can never succeed here, fast, instead of eating everyone else's
+    # response time for a connection that will never complete.
+    timeout: 1.5
   - name: bing
     disabled: false
   - name: qwant
@@ -37,3 +91,13 @@ engines:
     disabled: false
   - name: mojeek
     disabled: false
+  - name: google cse
+    disabled: true
+  - name: google cse images
+    disabled: true
+  - name: startpage
+    disabled: true
+  - name: startpage news
+    disabled: true
+  - name: startpage images
+    disabled: true
