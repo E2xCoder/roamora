@@ -12,6 +12,8 @@ import {
 } from "@/server/services/fact-extraction";
 import { validateExtractedOpeningHours } from "@/server/services/opening-hours-guard";
 import { validateExtractedPrice } from "@/server/services/price-guard";
+import { extractEventFactsFromText } from "@/server/services/event-extraction";
+import { validateExtractedEvent } from "@/server/services/event-guard";
 import { scoreConfidence, isOfficialSource, detectStaleness, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
@@ -62,6 +64,17 @@ export interface AutoplanRequest {
    * cannot force-add a place that OSM doesn't have).
    */
   mustSeeNames?: string[];
+  /**
+   * Named real-world events (a specific concert, festival, show) the caller
+   * wants researched and, if genuinely happening during the trip, scheduled
+   * as a fixed appointment the rest of the day plans around. Not autonomous
+   * event *discovery* — OSM has no concept of a time-bound event, so there
+   * is no free/self-hostable source this pipeline can poll for "what's on
+   * near here" without being told what to look for. Given a name, though,
+   * the same real research chain (search → fetch → extract → validate) used
+   * for opening hours/prices applies directly.
+   */
+  eventQueries?: string[];
 }
 
 export interface StopProvenance {
@@ -83,6 +96,16 @@ export interface ResearchTraceEntry {
   stage: string;
   status: "ok" | "skipped" | "failed";
   detail: string;
+}
+
+export interface EventResearchResult {
+  query: string;
+  status: "scheduled" | "not-matching-trip-date" | "not-found" | "research-unavailable";
+  eventName?: string;
+  startDate?: string;
+  endDate?: string;
+  startTime?: string;
+  reason?: string;
 }
 
 /**
@@ -121,6 +144,8 @@ export interface AutoplanResult {
   /** Real replanning result when a budget was given and the initial itinerary exceeded it — see budget-optimizer.ts. Null when no budget was given or the first pass already fit. */
   budgetOptimization: BudgetOptimizationResult | null;
   budgetWarning: string | null;
+  /** One entry per requested `eventQueries` item — what was researched and what happened to it. Empty when none were requested. */
+  events: EventResearchResult[];
 }
 
 const SHORTLIST_MULTIPLIER = 2; // discover more than needed, in case some are closed that day
@@ -461,6 +486,109 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     detail: `${finalStops.length} durak hazırlandı (${provenance.filter((p) => p.openingHoursSource !== "unverified").length} açılış saati doğrulandı)`,
   });
 
+  // --- 4b. named event research (real, but not autonomous discovery — see
+  //         AutoplanRequest.eventQueries's own comment for why) -------------
+  const events: EventResearchResult[] = [];
+  const MAX_EVENT_QUERIES = 3;
+  for (const query of (req.eventQueries ?? []).slice(0, MAX_EVENT_QUERIES)) {
+    if (!searchAvailable || !aiAvailable) {
+      events.push({ query, status: "research-unavailable" });
+      continue;
+    }
+    try {
+      const results = await searxngProvider.searchWeb(`"${query}" official program dates`, 5);
+      const page = results.find((r) => isOfficialSource(r.url, r.title, query)) ?? results[0];
+      if (!page) {
+        events.push({ query, status: "not-found", reason: "arama sonucu yok" });
+        continue;
+      }
+      const fetched = await fetchTextCapped(page.url);
+      if (!fetched.ok) {
+        events.push({ query, status: "not-found", reason: fetched.reason });
+        continue;
+      }
+      const sourceText = htmlToPlainText(fetched.text);
+      const eventFacts = await extractEventFactsFromText(query, fetched.text);
+      if (!eventFacts) {
+        events.push({ query, status: "not-found", reason: "sayfadan etkinlik bilgisi çıkarılamadı" });
+        continue;
+      }
+      const guardResult = validateExtractedEvent(eventFacts.facts, req.date, sourceText);
+      if (guardResult.status === "unknown") {
+        events.push({ query, status: "not-found", reason: guardResult.reason });
+        continue;
+      }
+      if (!guardResult.matchesTripDate) {
+        events.push({
+          query,
+          status: "not-matching-trip-date",
+          eventName: eventFacts.facts.eventName ?? undefined,
+          startDate: guardResult.startDate,
+          endDate: guardResult.endDate,
+        });
+        continue;
+      }
+
+      // Real venue location if named; otherwise the destination centre —
+      // still real coordinates, just less precise than a specific address.
+      let venueCoords = center;
+      if (eventFacts.facts.venueName) {
+        const venueGeo = await geocodeOnce(`${eventFacts.facts.venueName}, ${req.destination}`);
+        if (venueGeo) venueCoords = { lat: venueGeo.lat, lng: venueGeo.lng };
+      }
+
+      const eventStopId = `event:${query}`;
+      const eventInput: StopInput = {
+        id: eventStopId,
+        name: eventFacts.facts.eventName ?? query,
+        lat: venueCoords.lat,
+        lng: venueCoords.lng,
+        category: "event",
+        // Only a genuine startTime becomes a hard fixedTime appointment the
+        // optimizer schedules everything else around; without one, there is
+        // no specific hour to pin it to, so it schedules like any other
+        // flexible stop for the day instead of guessing a time.
+        fixedTime: guardResult.startTime ?? undefined,
+      };
+      finalStops.push({
+        input: eventInput,
+        scored: {
+          place: { id: eventStopId, name: eventInput.name, lat: venueCoords.lat, lng: venueCoords.lng, osmTag: "event", osmValue: "event", tags: {}, source: "osm" },
+          category: "event",
+          notabilityScore: 0,
+          distanceFromCenterMeters: 0,
+        },
+      });
+      provenance.push({
+        stopId: eventStopId,
+        name: eventInput.name,
+        category: "event",
+        openingHoursSource: "unverified",
+        openingHoursConfidence: "unknown",
+        priceSource: "unverified",
+        priceConfidence: "unknown",
+        summarySource: "none",
+      });
+      events.push({
+        query,
+        status: "scheduled",
+        eventName: eventInput.name,
+        startDate: guardResult.startDate,
+        endDate: guardResult.endDate,
+        startTime: guardResult.startTime ?? undefined,
+      });
+      trace.push({
+        stage: `event:${query}`,
+        status: "ok",
+        detail: `Gerçek etkinlik bulundu ve programa eklendi: ${eventInput.name}${guardResult.startTime ? ` (${guardResult.startTime})` : ""}`,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "etkinlik araştırması başarısız";
+      events.push({ query, status: "not-found", reason: detail });
+      trace.push({ stage: `event:${query}`, status: "failed", detail });
+    }
+  }
+
   // --- 5. real routing + the EXISTING deterministic optimizer --------------
   async function routeAndOptimize(
     stopsForRoute: Array<{ input: StopInput }>,
@@ -604,6 +732,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     researchMetadata,
     budgetOptimization,
     budgetWarning,
+    events,
   };
 }
 

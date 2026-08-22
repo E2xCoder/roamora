@@ -94,7 +94,8 @@ export interface FactExtractionResult {
   confidence: "medium";
 }
 
-async function callOllama(prompt: string): Promise<string> {
+/** Exported for reuse by other extraction paths (e.g. event-extraction.ts) that need the same Ollama call/error handling without duplicating it. */
+export async function callOllama(prompt: string): Promise<string> {
   const res = await fetch(`${config.OLLAMA_BASE_URL}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
