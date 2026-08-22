@@ -50,6 +50,16 @@ export interface AutoplanRequest {
   departureTime: string; // HH:MM
   startLocation?: { lat: number; lng: number; name?: string };
   endLocation?: { lat: number; lng: number; name?: string };
+  /**
+   * Extra minutes to hold in reserve at `endLocation` before `departureTime`
+   * — platform-finding, station navigation, a train/flight boarding cutoff
+   * before its actual departure. Real, not decorative: this tightens the
+   * effective end-of-day time the optimizer schedules against (see
+   * `departureSafety` in the result), reusing its existing, already-tested
+   * day-overrun conflict detection rather than adding a second, parallel
+   * safety check.
+   */
+  departureBufferMinutes?: number;
   budget?: number;
   currency?: string;
   /** Taxonomy category ids the user cares about more; used as scoring weights. */
@@ -96,6 +106,18 @@ export interface ResearchTraceEntry {
   stage: string;
   status: "ok" | "skipped" | "failed";
   detail: string;
+}
+
+export interface DepartureSafetyResult {
+  /** Whether an end/departure location was actually given — without one there is no specific point to be safe for, only the generic day-end time. */
+  hasDeparturePoint: boolean;
+  bufferMinutes: number;
+  requestedDepartureTime: string;
+  /** requestedDepartureTime minus bufferMinutes — the real cutoff the optimizer scheduled against. */
+  latestSafeArrivalTime: string;
+  /** True when the itinerary's real routing/scheduling fits within latestSafeArrivalTime. */
+  safe: boolean;
+  overrunMinutes: number;
 }
 
 export interface EventResearchResult {
@@ -146,9 +168,16 @@ export interface AutoplanResult {
   budgetWarning: string | null;
   /** One entry per requested `eventQueries` item — what was researched and what happened to it. Empty when none were requested. */
   events: EventResearchResult[];
+  departureSafety: DepartureSafetyResult;
 }
 
 const SHORTLIST_MULTIPLIER = 2; // discover more than needed, in case some are closed that day
+
+function subtractMinutes(hhmm: string, minutes: number): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const total = ((h * 60 + m - minutes) % (24 * 60) + 24 * 60) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
 
 /**
  * Fetches and extracts hours from a second, independent search result and
@@ -677,6 +706,13 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   }
 
   // --- 5. real routing + the EXISTING deterministic optimizer --------------
+  const departureBufferMinutes = Math.max(0, req.departureBufferMinutes ?? 0);
+  // Tightens the effective end-of-day time the optimizer schedules against,
+  // rather than adding a second, parallel "did we make the departure" check
+  // — a schedule that overruns this earlier cutoff surfaces through the
+  // optimizer's own existing, already-tested "day-overrun" conflict.
+  const effectiveDayEnd = subtractMinutes(req.departureTime, departureBufferMinutes);
+
   async function routeAndOptimize(
     stopsForRoute: Array<{ input: StopInput }>,
     stageLabel: string
@@ -731,7 +767,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       {
         stops: stopsForRoute.map((s) => s.input),
         dayStart: req.arrivalTime,
-        dayEnd: req.departureTime,
+        dayEnd: effectiveDayEnd,
         start,
         end: req.endLocation,
       },
@@ -751,16 +787,15 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
 
   let { itinerary, transitMetadata } = await routeAndOptimize(finalStops, "routing");
 
+  const mustSeeIds = new Set(
+    finalStops
+      .filter((s) => (req.mustSeeNames ?? []).some((n) => s.input.name.toLowerCase().includes(n.toLowerCase())))
+      .map((s) => s.input.id)
+  );
+
   // --- 6. real budget replanning, not a passive warning --------------------
   let budgetOptimization: BudgetOptimizationResult | null = null;
   if (req.budget != null) {
-    const mustSeeIds = new Set(
-      finalStops
-        .filter((s) =>
-          (req.mustSeeNames ?? []).some((n) => s.input.name.toLowerCase().includes(n.toLowerCase()))
-        )
-        .map((s) => s.input.id)
-    );
     const { keptStops, result } = planBudgetOptimization(finalStops, shortlist, req.budget, mustSeeIds);
     budgetOptimization = result;
 
@@ -794,6 +829,34 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     }
   }
 
+  // --- 6b. departure safety: replan if the schedule risks missing it ------
+  // Same removal-priority idea as budget-optimizer.ts (least-notable,
+  // non-protected stop first) but keyed on real schedule overrun rather than
+  // cost — reuses the same mustSeeIds protection and the same
+  // routeAndOptimize closure, never inventing a new optimizer path.
+  let departureReplanAttempts = 0;
+  while (itinerary.overrunMinutes > 0 && departureReplanAttempts < finalStops.length) {
+    const removable = finalStops
+      .filter((s) => !mustSeeIds.has(s.input.id) && !s.input.locked && !s.input.fixedTime)
+      .sort((a, b) => a.scored.notabilityScore - b.scored.notabilityScore);
+    const target = removable[0];
+    if (!target) break; // nothing left we're allowed to remove
+    finalStops = finalStops.filter((s) => s.input.id !== target.input.id);
+    provenance = provenance.filter((p) => p.stopId !== target.input.id);
+    departureReplanAttempts++;
+    ({ itinerary, transitMetadata } = await routeAndOptimize(finalStops, "departure-safety-reroute"));
+  }
+  if (departureReplanAttempts > 0) {
+    trace.push({
+      stage: "departure-safety",
+      status: itinerary.overrunMinutes === 0 ? "ok" : "failed",
+      detail:
+        itinerary.overrunMinutes === 0
+          ? `Kalkış güvenliği için ${departureReplanAttempts} durak çıkarıldı, plan artık güvenli varış saatine uyuyor`
+          : `${departureReplanAttempts} durak çıkarıldıktan sonra bile kalkış güvenliği sağlanamadı (zorunlu/sabit/kilitli duraklar korundu)`,
+    });
+  }
+
   const budgetWarning =
     budgetOptimization && !budgetOptimization.satisfied
       ? `Bütçe (${req.budget} ${req.currency ?? ""}) tüm zorunlu/kilitli duraklar korunarak karşılanamadı — ulaşılabilir minimum maliyet: ${budgetOptimization.minimumFeasibleCost} ${req.currency ?? ""}.`
@@ -809,6 +872,22 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     transitRouting: transitMetadata,
   };
 
+  const departureSafety: DepartureSafetyResult = {
+    hasDeparturePoint: req.endLocation != null,
+    bufferMinutes: departureBufferMinutes,
+    requestedDepartureTime: req.departureTime,
+    latestSafeArrivalTime: effectiveDayEnd,
+    safe: itinerary.overrunMinutes === 0,
+    overrunMinutes: itinerary.overrunMinutes,
+  };
+  if (!departureSafety.safe) {
+    trace.push({
+      stage: "departure-safety",
+      status: "failed",
+      detail: `Plan, güvenli varış saatinden (${effectiveDayEnd}) ${itinerary.overrunMinutes} dakika sonra tamamlanıyor — kalkışı kaçırma riski var.`,
+    });
+  }
+
   return {
     destination: { name: destGeo.displayName, ...center },
     candidatesDiscovered: discovered.length,
@@ -820,6 +899,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     budgetOptimization,
     budgetWarning,
     events,
+    departureSafety,
   };
 }
 
