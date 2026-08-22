@@ -120,6 +120,13 @@ export interface DepartureSafetyResult {
   overrunMinutes: number;
 }
 
+export interface DelaySimulationResult {
+  delayMinutes: number;
+  feasible: boolean;
+  conflictCount: number;
+  departureSafe: boolean;
+}
+
 export interface EventResearchResult {
   query: string;
   status: "scheduled" | "not-matching-trip-date" | "not-found" | "research-unavailable";
@@ -169,6 +176,10 @@ export interface AutoplanResult {
   /** One entry per requested `eventQueries` item — what was researched and what happened to it. Empty when none were requested. */
   events: EventResearchResult[];
   departureSafety: DepartureSafetyResult;
+  /** Real robustness check: re-runs the same deterministic optimizer, same real matrix, with the start time pushed back by each increment. No new network calls. */
+  delaySimulation: DelaySimulationResult[];
+  /** The smallest delay (minutes) that breaks feasibility or departure safety — null if the plan survives every simulated delay. */
+  fragileAtMinutes: number | null;
 }
 
 const SHORTLIST_MULTIPLIER = 2; // discover more than needed, in case some are closed that day
@@ -177,6 +188,10 @@ function subtractMinutes(hhmm: string, minutes: number): string {
   const [h, m] = hhmm.split(":").map(Number);
   const total = ((h * 60 + m - minutes) % (24 * 60) + 24 * 60) % (24 * 60);
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function addMinutes(hhmm: string, minutes: number): string {
+  return subtractMinutes(hhmm, -minutes);
 }
 
 /**
@@ -716,7 +731,11 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   async function routeAndOptimize(
     stopsForRoute: Array<{ input: StopInput }>,
     stageLabel: string
-  ): Promise<{ itinerary: OptimizeResult; transitMetadata: ResearchMetadata["transitRouting"] }> {
+  ): Promise<{
+    itinerary: OptimizeResult;
+    transitMetadata: ResearchMetadata["transitRouting"];
+    matrix: Awaited<ReturnType<typeof fetchMatrix>>;
+  }> {
     const routePoints = [start, ...stopsForRoute.map((s) => s.input)];
     let routeMatrix: Awaited<ReturnType<typeof fetchMatrix>>;
     let routeTransitMetadata: ResearchMetadata["transitRouting"] = null;
@@ -782,10 +801,10 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
         : `${routeItinerary.conflicts.length} çakışma tespit edildi`,
     });
 
-    return { itinerary: routeItinerary, transitMetadata: routeTransitMetadata };
+    return { itinerary: routeItinerary, transitMetadata: routeTransitMetadata, matrix: routeMatrix };
   }
 
-  let { itinerary, transitMetadata } = await routeAndOptimize(finalStops, "routing");
+  let { itinerary, transitMetadata, matrix: lastMatrix } = await routeAndOptimize(finalStops, "routing");
 
   const mustSeeIds = new Set(
     finalStops
@@ -824,7 +843,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
             });
           }
         }
-        ({ itinerary, transitMetadata } = await routeAndOptimize(finalStops, "budget-reroute"));
+        ({ itinerary, transitMetadata, matrix: lastMatrix } = await routeAndOptimize(finalStops, "budget-reroute"));
       }
     }
   }
@@ -844,7 +863,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     finalStops = finalStops.filter((s) => s.input.id !== target.input.id);
     provenance = provenance.filter((p) => p.stopId !== target.input.id);
     departureReplanAttempts++;
-    ({ itinerary, transitMetadata } = await routeAndOptimize(finalStops, "departure-safety-reroute"));
+    ({ itinerary, transitMetadata, matrix: lastMatrix } = await routeAndOptimize(finalStops, "departure-safety-reroute"));
   }
   if (departureReplanAttempts > 0) {
     trace.push({
@@ -888,6 +907,46 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     });
   }
 
+  // --- 7. delay simulation — real robustness check, no new network calls --
+  // Reuses the same real routing matrix and the same deterministic
+  // optimizer; only the simulated start time changes, so this tests
+  // exactly what a real late start (a delayed train, a slow first leg)
+  // would do to fixed events, closing-time constraints, and the departure
+  // cutoff — not a separate, parallel model of the day.
+  const DELAY_INCREMENTS_MIN = [5, 10, 15, 20, 30];
+  const delaySimulation: DelaySimulationResult[] = DELAY_INCREMENTS_MIN.map((delayMinutes) => {
+    const simulated = optimizeItinerary(
+      {
+        stops: finalStops.map((s) => s.input),
+        dayStart: addMinutes(req.arrivalTime, delayMinutes),
+        dayEnd: effectiveDayEnd,
+        start,
+        end: req.endLocation,
+      },
+      lastMatrix
+    );
+    return {
+      delayMinutes,
+      feasible: simulated.feasible,
+      conflictCount: simulated.conflicts.length,
+      departureSafe: simulated.overrunMinutes === 0,
+    };
+  });
+  const fragileAtMinutes = delaySimulation.find((d) => !d.feasible || !d.departureSafe)?.delayMinutes ?? null;
+  if (fragileAtMinutes != null) {
+    trace.push({
+      stage: "delay-simulation",
+      status: "failed",
+      detail: `Plan +${fragileAtMinutes} dakika gecikmeyle artık uygun/güvenli değil — kırılgan bir segment var.`,
+    });
+  } else {
+    trace.push({
+      stage: "delay-simulation",
+      status: "ok",
+      detail: `Plan test edilen tüm gecikmelere (+${DELAY_INCREMENTS_MIN[DELAY_INCREMENTS_MIN.length - 1]} dakikaya kadar) karşı dayanıklı`,
+    });
+  }
+
   return {
     destination: { name: destGeo.displayName, ...center },
     candidatesDiscovered: discovered.length,
@@ -900,6 +959,8 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     budgetWarning,
     events,
     departureSafety,
+    delaySimulation,
+    fragileAtMinutes,
   };
 }
 
