@@ -1,6 +1,13 @@
 import "server-only";
 import { isSupportedBySource } from "@/server/services/opening-hours-guard";
-import type { ExtractedEventFacts } from "@/server/services/event-extraction";
+
+/** The minimal shape this guard actually needs — deliberately not tied to the full single-event extraction type, since a multi-event list item (extractEventListFromText) has no "aboutThisEvent"/single-name field to check but is otherwise identical. */
+export interface EventDateFacts {
+  startDate: string | null;
+  endDate: string | null;
+  startTime: string | null;
+  endTime: string | null;
+}
 
 /**
  * Deterministic verification for extracted event facts — the event
@@ -36,7 +43,7 @@ function isRealCalendarDate(iso: string): boolean {
 }
 
 export function validateExtractedEvent(
-  facts: ExtractedEventFacts,
+  facts: EventDateFacts,
   tripDate: string, // YYYY-MM-DD
   sourceText: string,
   now: Date = new Date()

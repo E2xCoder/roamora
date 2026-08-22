@@ -105,6 +105,23 @@ describe("validateExtractedEvent", () => {
     ).toEqual({ status: "unknown", reason: "başlangıç saati geçersiz biçimde" });
   });
 
+  it(
+    "validates a multi-event-list item (extractEventListFromText's shape, no aboutThisEvent/eventName " +
+      "requirement) exactly like a single named-event extraction — same guard, same rules",
+    () => {
+      const listItem = { startDate: "2026-08-25", endDate: "2026-08-25", startTime: "20:00", endTime: null };
+      const result = validateExtractedEvent(listItem, "2026-08-25", "Concert on 2026-08-25 at 20:00", new Date("2026-08-01"));
+      expect(result).toEqual({
+        status: "valid",
+        startDate: "2026-08-25",
+        endDate: "2026-08-25",
+        startTime: "20:00",
+        endTime: null,
+        matchesTripDate: true,
+      });
+    }
+  );
+
   it("accepts a clean single-day event with a real start time", () => {
     const result = validateExtractedEvent(
       facts({ startDate: "2026-08-25", endDate: "2026-08-25", startTime: "19:00" }),
