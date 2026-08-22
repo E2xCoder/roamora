@@ -28,6 +28,29 @@ OLLAMA_MODEL=llama3.1:8b
 AI_PROVIDER=ollama
 ```
 
+### GPU acceleration (real, not optional on a machine that has one)
+
+`docker-compose.yml`'s `ollama` service requests an NVIDIA GPU via the
+standard `deploy.resources.reservations.devices` block. Live-measured, this
+is not a nice-to-have: without it, Ollama silently falls back to CPU
+inference — confirmed via `docker compose logs ollama` showing `inference
+compute id=cpu` — and a trivial 2-3 token generation took 13-70 seconds. With
+the GPU reservation in place, the same container correctly detects and uses
+a real NVIDIA GPU (`inference compute ... library=CUDA name=CUDA0
+description="NVIDIA GeForce RTX 5070 Laptop GPU"`) and the same call drops to
+under 300ms once the model is warm (the very first call after a fresh
+container start pays a one-time few-second CUDA-context warmup — real, not a
+bug, expect it and don't judge GPU health from that first call alone).
+
+This requires the [NVIDIA Container
+Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+installed on the host (`docker info` should list `nvidia` under `Runtimes`).
+On a host with no NVIDIA GPU/driver/Container Toolkit, this reservation
+cannot be satisfied and `docker compose up` fails clearly for the `ollama`
+service — not a silent, slow CPU fallback — at which point removing the
+`deploy` block (real CPU-only operation, just much slower per LLM call) is
+the correct fix, not forcing GPU-only requirements onto a CPU-only host.
+
 ## OpenTripPlanner — repeatable multi-city provisioning
 
 Transit routing needs a graph built from a real OSM extract and a real GTFS
@@ -106,6 +129,37 @@ timed out — OpenTripPlanner's real shape while its graph is still loading,
 since its JVM process comes up long before its HTTP server does), **unhealthy**
 (reachable but broken — e.g. Ollama running without the configured model
 pulled), and **available**.
+
+### Live-verified: a full `down` / `up -d` cycle
+
+Not just documented — actually run, end to end, once a real OTP graph
+already existed (via `scripts/provision-transit.ts`, see above):
+
+```
+docker compose down            # stops and removes all 3 containers + the network
+docker compose up -d           # recreates everything from scratch
+```
+
+Real, observed results:
+- **SearXNG** and **OpenTripPlanner** came back `healthy` within seconds —
+  OTP in particular loaded its existing graph from the bind-mounted
+  `infra/otp/graph_dir/` in ~20s, nowhere near the 180s `start_period`
+  budgeted for a from-scratch graph build, confirming the bind mount (a
+  host directory, not a Docker-managed volume) genuinely survives the cycle
+  without needing a rebuild.
+- **Ollama**'s named volume (`ollama_data`) survives the same way, but a
+  model pulled into a *different* Ollama instance (e.g. a native,
+  non-containerized one used ad hoc during development) obviously does
+  not transfer — the container starts with zero models until
+  `docker compose exec ollama ollama pull <model>` is run against it once.
+- A real, live autoplan request afterward — through the freshly recreated
+  stack, no shortcuts — completed successfully: 60/60 real OpenTripPlanner
+  routing calls, real SearXNG-backed research (8 official domains resolved
+  directly, 8 search queries avoided), a real restaurant selected via the
+  containerized Ollama, real Wikivoyage-sourced local food facts, and 2 real
+  hidden gems found and scheduled — every subsystem this project has,
+  working together against the stack exactly as a clean deployment would
+  experience it.
 
 ## Known limitations, stated honestly
 

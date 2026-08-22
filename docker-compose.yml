@@ -45,6 +45,22 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    # Real, live-observed gap: without this, Ollama silently falls back to
+    # CPU inference (confirmed via `docker compose logs ollama`: "inference
+    # compute id=cpu") even on a machine with a real NVIDIA GPU and Docker's
+    # own `nvidia` container runtime already available (`docker info` lists
+    # it) — a trivial 2-3 token generation took 13-70s on CPU. `deploy.
+    # resources.reservations` is the standard Compose way to request GPU
+    # passthrough; on a host with no NVIDIA GPU/driver/Container Toolkit
+    # this reservation simply cannot be satisfied and `docker compose up`
+    # fails clearly for this service — not a silent, slow CPU fallback.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 30s
