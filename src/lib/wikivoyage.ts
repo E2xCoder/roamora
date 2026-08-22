@@ -10,7 +10,9 @@ export async function searchDestination(query: string) {
     format: "json",
     origin: "*",
   });
-  const res = await fetch(`${WIKI_API}?${params}`);
+  const res = await fetch(`${WIKI_API}?${params}`, {
+    headers: { "User-Agent": "Roamora/1.0 (personal travel planner; https://github.com/E2xCoder/roamora)" },
+  });
   if (!res.ok) throw new Error(`Wikivoyage API error: ${res.status}`);
   const data = await res.json();
   return data.query.search as Array<{ title: string; snippet: string; pageid: number }>;
@@ -24,7 +26,9 @@ export async function getDestinationContent(title: string) {
     format: "json",
     origin: "*",
   });
-  const res = await fetch(`${WIKI_API}?${params}`);
+  const res = await fetch(`${WIKI_API}?${params}`, {
+    headers: { "User-Agent": "Roamora/1.0 (personal travel planner; https://github.com/E2xCoder/roamora)" },
+  });
   if (!res.ok) throw new Error(`Wikivoyage API error: ${res.status}`);
   const data = await res.json();
   return {
@@ -48,7 +52,9 @@ export async function getDestinationSection(title: string, sectionIndex: string)
     format: "json",
     origin: "*",
   });
-  const res = await fetch(`${WIKI_API}?${params}`);
+  const res = await fetch(`${WIKI_API}?${params}`, {
+    headers: { "User-Agent": "Roamora/1.0 (personal travel planner; https://github.com/E2xCoder/roamora)" },
+  });
   if (!res.ok) throw new Error(`Wikivoyage API error: ${res.status}`);
   const data = await res.json();
   return data.parse.wikitext?.["*"] || "";

@@ -11,6 +11,7 @@ import { isMenuItemNameSupported, isLikelyNavigationLabel, estimateQueueSignal, 
 import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { resolveResearchSource } from "@/server/services/direct-research";
+import { fetchWikivoyageEatSection, cityNameForWikivoyageSearch } from "@/server/services/wikivoyage-research";
 
 /**
  * Priority 3 — restaurant and menu intelligence.
@@ -123,6 +124,10 @@ export interface LocalFoodResult {
   localDrink?: LocalFoodEntry;
   affordableLocalOption?: LocalFoodEntry;
   source?: string;
+  /** Which tier actually supplied the source text — Wikivoyage's own curated "Eat" section is tried before a generic web search. */
+  sourceType?: "wikivoyage" | "web-search";
+  /** Real, named food/restaurant listings from Wikivoyage's structured {{eat|...}} entries, when that source was used — independent of the six named fields above, and never LLM-derived. */
+  curatedListings?: Array<{ name: string; description?: string }>;
   reason?: string;
 }
 
@@ -143,20 +148,75 @@ function median(nums: number[]): number | undefined {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
+function keepLocalFoodEntry(
+  entry: { name: string; description: string | null } | null,
+  sourceText: string
+): LocalFoodEntry | undefined {
+  if (!entry) return undefined;
+  if (!isMenuItemNameSupported(entry.name, sourceText)) return undefined; // not actually on the page — dropped, not invented
+  return { name: entry.name, description: entry.description ?? undefined };
+}
+
+function hasAnyLocalFoodField(r: LocalFoodResult): boolean {
+  return !!(r.iconicDish || r.traditionalDish || r.dessert || r.bakerySpecialty || r.localDrink || r.affordableLocalOption);
+}
+
 /**
- * Researches destination-level local food facts (spec §Priority 3.6) — a
- * single, bounded search+extraction, independent of any specific restaurant.
- * Every non-null field is independently re-checked for real textual support
- * in the fetched source before being trusted; a field the model returned but
- * that never actually appears on the page is dropped, not passed through.
+ * Researches destination-level local food facts (spec §Priority 4) —
+ * independent of any specific restaurant. Tries Wikivoyage's own curated
+ * "Eat" section first (real, community-maintained travel-guide content
+ * with structured, named listings — a genuinely more authoritative source
+ * than a ranked web-search hit that might land anywhere), falling back to
+ * a generic SearXNG search only when Wikivoyage has no article or no Eat
+ * section for the destination at all. Every non-null field, from either
+ * tier, is independently re-checked for real textual support in the
+ * fetched source before being trusted; a field the model returned but that
+ * never actually appears on the page is dropped, not passed through.
  */
 export async function researchLocalFood(
   destination: string,
   searchAvailable: boolean,
   aiAvailable: boolean
 ): Promise<LocalFoodResult> {
-  if (!searchAvailable || !aiAvailable) {
-    return { status: "research-unavailable", reason: "arama veya AI sağlayıcı yapılandırılmamış" };
+  if (!aiAvailable) {
+    return { status: "research-unavailable", reason: "AI sağlayıcı yapılandırılmamış" };
+  }
+
+  // --- tier 1: Wikivoyage's own curated Eat section -----------------------
+  // Only the city portion is searched here (see
+  // cityNameForWikivoyageSearch's docstring for the real bug this fixes);
+  // the SearXNG fallback below still uses the full destination string.
+  try {
+    const eat = await fetchWikivoyageEatSection(cityNameForWikivoyageSearch(destination));
+    if (eat) {
+      const facts = await extractLocalFoodFromText(destination, eat.text);
+      if (facts) {
+        const result: LocalFoodResult = {
+          status: "found",
+          iconicDish: keepLocalFoodEntry(facts.iconicDish, eat.text),
+          traditionalDish: keepLocalFoodEntry(facts.traditionalDish, eat.text),
+          dessert: keepLocalFoodEntry(facts.dessert, eat.text),
+          bakerySpecialty: keepLocalFoodEntry(facts.bakerySpecialty, eat.text),
+          localDrink: keepLocalFoodEntry(facts.localDrink, eat.text),
+          affordableLocalOption: keepLocalFoodEntry(facts.affordableLocalOption, eat.text),
+          source: eat.articleUrl,
+          sourceType: "wikivoyage",
+          curatedListings: eat.listings.length > 0 ? eat.listings : undefined,
+        };
+        if (hasAnyLocalFoodField(result) || result.curatedListings) return result;
+      }
+      // Wikivoyage had an Eat section but nothing usable came out of it —
+      // fall through to the search tier rather than reporting not-found
+      // prematurely (a short Eat section can have real listings but no
+      // narrative prose the extractor can use).
+    }
+  } catch {
+    // Wikivoyage tier failure never aborts the whole lookup.
+  }
+
+  // --- tier 2: existing generic SearXNG fallback --------------------------
+  if (!searchAvailable) {
+    return { status: "research-unavailable", reason: "Wikivoyage'da sonuç yok, arama sağlayıcı da yapılandırılmamış" };
   }
   try {
     const results = await searxngProvider.searchWeb(
@@ -173,23 +233,18 @@ export async function researchLocalFood(
     const facts = await extractLocalFoodFromText(destination, fetched.text);
     if (!facts) return { status: "not-found", reason: "sayfadan yerel yemek bilgisi çıkarılamadı" };
 
-    const keep = (entry: { name: string; description: string | null } | null): LocalFoodEntry | undefined => {
-      if (!entry) return undefined;
-      if (!isMenuItemNameSupported(entry.name, sourceText)) return undefined; // not actually on the page — dropped, not invented
-      return { name: entry.name, description: entry.description ?? undefined };
-    };
-
     const result: LocalFoodResult = {
       status: "found",
-      iconicDish: keep(facts.iconicDish),
-      traditionalDish: keep(facts.traditionalDish),
-      dessert: keep(facts.dessert),
-      bakerySpecialty: keep(facts.bakerySpecialty),
-      localDrink: keep(facts.localDrink),
-      affordableLocalOption: keep(facts.affordableLocalOption),
+      iconicDish: keepLocalFoodEntry(facts.iconicDish, sourceText),
+      traditionalDish: keepLocalFoodEntry(facts.traditionalDish, sourceText),
+      dessert: keepLocalFoodEntry(facts.dessert, sourceText),
+      bakerySpecialty: keepLocalFoodEntry(facts.bakerySpecialty, sourceText),
+      localDrink: keepLocalFoodEntry(facts.localDrink, sourceText),
+      affordableLocalOption: keepLocalFoodEntry(facts.affordableLocalOption, sourceText),
       source: page.url,
+      sourceType: "web-search",
     };
-    if (!result.iconicDish && !result.traditionalDish && !result.dessert && !result.bakerySpecialty && !result.localDrink && !result.affordableLocalOption) {
+    if (!hasAnyLocalFoodField(result)) {
       return { status: "not-found", reason: "çıkarılan alanların hiçbiri kaynak sayfada doğrulanamadı" };
     }
     return result;
