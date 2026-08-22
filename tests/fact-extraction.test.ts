@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looseTextToOsmSyntax, htmlToPlainText } from "@/server/services/fact-extraction";
+import { looseTextToOsmSyntax, htmlToPlainText, repairTruncatedJsonArray } from "@/server/services/fact-extraction";
 
 describe("htmlToPlainText", () => {
   it("strips tags, scripts, styles and comments down to visible text", () => {
@@ -191,5 +191,48 @@ describe("looseTextToOsmSyntax — multilingual, real extraction test cases", ()
 
   it("handles 12pm/12am correctly (noon and midnight, not '12:00' literally added to 12)", () => {
     expect(looseTextToOsmSyntax("12am-12pm")).toBe("Mo-Su 00:00-12:00");
+  });
+});
+
+describe("repairTruncatedJsonArray", () => {
+  it(
+    "real case: salvages complete items from a response cut off mid-array (a real llama3.1:8b " +
+      "response over a real German restaurant menu page truncated one item short of the closing " +
+      "bracket at a 1500-token budget — this must recover the 14 real, complete items rather than " +
+      "losing all of them to a single JSON.parse failure)",
+    () => {
+      const raw = `{"menuItems":[{"category":"SUPPEN","name":"Erdäpfelsuppe","price":4.5,"currency":"Euro"},{"category":"HAUPTGERICHTE","name":"Wiener Schnitzel","price":18.2,"currency":"Euro"},{"category":"SÜSSE","name":"Apfelstru`;
+      const items = repairTruncatedJsonArray(raw, "menuItems") as Array<{ name: string }>;
+      expect(items).toHaveLength(2);
+      expect(items[0].name).toBe("Erdäpfelsuppe");
+      expect(items[1].name).toBe("Wiener Schnitzel");
+    }
+  );
+
+  it("returns every item unchanged when the array was never truncated at all", () => {
+    const raw = `{"menuItems":[{"name":"A"},{"name":"B"},{"name":"C"}]}`;
+    expect(repairTruncatedJsonArray(raw, "menuItems")).toEqual([{ name: "A" }, { name: "B" }, { name: "C" }]);
+  });
+
+  it("returns an empty array when the named key is not present at all", () => {
+    expect(repairTruncatedJsonArray(`{"other":[{"name":"A"}]}`, "menuItems")).toEqual([]);
+  });
+
+  it("returns an empty array when truncation happens before any item completes", () => {
+    expect(repairTruncatedJsonArray(`{"menuItems":[{"name":"Incomple`, "menuItems")).toEqual([]);
+  });
+
+  it("does not get confused by a comma or brace inside a string value", () => {
+    const raw = `{"menuItems":[{"name":"Salt, Pepper {and} Spice","price":5},{"name":"Trunca`;
+    const items = repairTruncatedJsonArray(raw, "menuItems") as Array<{ name: string }>;
+    expect(items).toHaveLength(1);
+    expect(items[0].name).toBe("Salt, Pepper {and} Spice");
+  });
+
+  it("works on the second occurrence's key name (events, not menuItems)", () => {
+    const raw = `{"events":[{"eventName":"Festival A","startDate":"2026-06-01"},{"eventName":"Trunc`;
+    const items = repairTruncatedJsonArray(raw, "events") as Array<{ eventName: string }>;
+    expect(items).toHaveLength(1);
+    expect(items[0].eventName).toBe("Festival A");
   });
 });

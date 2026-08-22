@@ -38,6 +38,23 @@ describe("extractSameDomainLinks", () => {
     expect(extractSameDomainLinks(`<a href="/x">x</a>`, "not a url")).toEqual([]);
   });
 
+  it(
+    "real case: decodes HTML-entity-encoded hrefs (wirtshaus-enzian.de's real theme emits " +
+      "href=\"http&#x3A;&#x2F;&#x2F;...&#x2F;speisekarte\") — new URL() cannot parse the raw " +
+      "encoded form at all, so this link was silently dropped before the fix",
+    () => {
+      const html = `<a href="http&#x3A;&#x2F;&#x2F;www.example.de&#x2F;speisekarte">Speisekarte</a>`;
+      expect(extractSameDomainLinks(html, "http://www.example.de/")).toEqual([
+        "http://www.example.de/speisekarte",
+      ]);
+    }
+  );
+
+  it("decodes decimal numeric character references too", () => {
+    const html = `<a href="&#104;&#116;&#116;&#112;&#58;&#47;&#47;example.com&#47;menu">Menu</a>`;
+    expect(extractSameDomainLinks(html, "http://example.com/")).toEqual(["http://example.com/menu"]);
+  });
+
   it("does not throw on a genuinely unparseable href, and still returns the valid links around it", () => {
     const html = `<a href="/ok">ok</a><a href="http://[not-a-valid-host">bad</a><a href="/also-ok">also ok</a>`;
     expect(() => extractSameDomainLinks(html, "https://example.com/")).not.toThrow();

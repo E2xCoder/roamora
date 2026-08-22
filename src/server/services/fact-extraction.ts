@@ -94,8 +94,22 @@ export interface FactExtractionResult {
   confidence: "medium";
 }
 
-/** Exported for reuse by other extraction paths (e.g. event-extraction.ts) that need the same Ollama call/error handling without duplicating it. */
-export async function callOllama(prompt: string): Promise<string> {
+/**
+ * Exported for reuse by other extraction paths (event-extraction.ts,
+ * restaurant-extraction.ts) that need the same Ollama call/error handling
+ * without duplicating it.
+ *
+ * `maxTokens` defaults to 200 — enough for a single hours/price fact, this
+ * function's original use. Real, live-observed bug: extractMenuFromText and
+ * extractEventListFromText reused that same 200-token cap for a LIST of up
+ * to 20 items, which silently truncated the model's JSON mid-array on every
+ * real multi-item menu tested (confirmed directly: a real German menu page
+ * with genuinely extractable content produced a 629-character response
+ * cut off mid-object, failing JSON.parse and — correctly, safely, but
+ * uselessly — falling through to "no items found" rather than fabricating
+ * anything). List-style callers must pass a larger budget explicitly.
+ */
+export async function callOllama(prompt: string, maxTokens = 200): Promise<string> {
   const res = await fetch(`${config.OLLAMA_BASE_URL}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -104,9 +118,12 @@ export async function callOllama(prompt: string): Promise<string> {
       prompt,
       stream: false,
       format: "json",
-      options: { temperature: 0.1, num_predict: 200 },
+      options: { temperature: 0.1, num_predict: maxTokens },
     }),
-    signal: AbortSignal.timeout(30_000),
+    // A larger token budget takes proportionally longer to generate — the
+    // original flat 30s timeout was sized for a 200-token single-fact
+    // response and would itself cut off a genuinely longer list response.
+    signal: AbortSignal.timeout(Math.max(30_000, maxTokens * 100)),
   });
 
   if (!res.ok) {
@@ -465,6 +482,72 @@ function hasContradiction(parts: Array<{ spec: string; open: string; close: stri
     }
   }
   return false;
+}
+
+/**
+ * Salvages complete array elements from a JSON response that was cut off
+ * mid-generation — a genuinely recurring failure mode for any list-style
+ * extraction (a menu, an event calendar), since no fixed token budget can
+ * guarantee covering every real page's real item count. Scans for
+ * `"arrayKey": [ ... ]` and returns every syntactically complete `{...}`
+ * object found before the cutoff, discarding only the one partial object
+ * actually truncated mid-way — never inventing or repairing its content.
+ * Callers still validate each salvaged item exactly as they would a
+ * cleanly-parsed one; this only recovers otherwise fully-lost real data,
+ * it does not weaken any downstream guard.
+ */
+export function repairTruncatedJsonArray(raw: string, arrayKey: string): unknown[] {
+  const keyIdx = raw.indexOf(`"${arrayKey}"`);
+  if (keyIdx === -1) return [];
+  const bracketStart = raw.indexOf("[", keyIdx);
+  if (bracketStart === -1) return [];
+
+  const items: string[] = [];
+  let depth = 0;
+  let itemStart = -1;
+  let inString = false;
+  let escape = false;
+
+  for (let i = bracketStart + 1; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === "{") {
+      if (depth === 0) itemStart = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && itemStart !== -1) {
+        items.push(raw.slice(itemStart, i + 1));
+        itemStart = -1;
+      }
+    } else if (ch === "]" && depth === 0) {
+      break;
+    }
+  }
+
+  const out: unknown[] = [];
+  for (const itemStr of items) {
+    try {
+      out.push(JSON.parse(itemStr));
+    } catch {
+      // A malformed individual object (rare — usually only the very last,
+      // genuinely truncated one) is skipped, not force-repaired.
+    }
+  }
+  return out;
 }
 
 export function looseTextToOsmSyntax(text: string): string | null {

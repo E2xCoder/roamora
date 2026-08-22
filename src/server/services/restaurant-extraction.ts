@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { config } from "@/server/config";
-import { callOllama, htmlToPlainText, ExtractionUnavailableError } from "@/server/services/fact-extraction";
+import { callOllama, htmlToPlainText, ExtractionUnavailableError, repairTruncatedJsonArray } from "@/server/services/fact-extraction";
 
 /**
  * Structured menu/local-food extraction — the restaurant counterpart to
@@ -74,7 +74,13 @@ Do not guess a price or invent a dish. Only include an item whose name is actual
 
   let raw: string;
   try {
-    raw = await callOllama(prompt);
+    // A real menu of up to 20 items needs far more than the 200-token
+    // default sized for a single fact — see callOllama's docstring for the
+    // real, live-observed truncation bug this fixes (confirmed directly: a
+    // genuine German restaurant menu page produced a 629-char, mid-object
+    // truncated response at the old default, every time; 1500 tokens still
+    // cut off a real 14-item menu one item short of the closing bracket).
+    raw = await callOllama(prompt, 2200);
   } catch (err) {
     if (err instanceof ExtractionUnavailableError) throw err;
     throw new ExtractionUnavailableError("AI_UNREACHABLE", `Ollama'ya ulaşılamadı (${config.OLLAMA_BASE_URL}).`);
@@ -87,7 +93,14 @@ Do not guess a price or invent a dish. Only include an item whose name is actual
   try {
     parsedJson = JSON.parse(jsonMatch[0]);
   } catch {
-    return [];
+    // The response was cut off mid-generation — salvage whichever items
+    // completed before the truncation rather than losing all of them.
+    const salvaged = repairTruncatedJsonArray(raw, "menuItems");
+    const validatedItems = salvaged
+      .map((item) => menuItemSchema.safeParse(item))
+      .filter((r) => r.success)
+      .map((r) => r.data);
+    return validatedItems;
   }
 
   const validated = menuSchema.safeParse(parsedJson);
@@ -157,7 +170,9 @@ Do not guess. Use null for any field the page does not actually mention.`;
 
   let raw: string;
   try {
-    raw = await callOllama(prompt);
+    // Six nested objects with descriptions — more headroom than a single
+    // fact needs, same reasoning as extractMenuFromText above.
+    raw = await callOllama(prompt, 600);
   } catch (err) {
     if (err instanceof ExtractionUnavailableError) throw err;
     throw new ExtractionUnavailableError("AI_UNREACHABLE", `Ollama'ya ulaşılamadı (${config.OLLAMA_BASE_URL}).`);

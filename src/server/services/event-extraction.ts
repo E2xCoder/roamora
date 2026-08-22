@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { config } from "@/server/config";
-import { callOllama, htmlToPlainText, ExtractionUnavailableError } from "@/server/services/fact-extraction";
+import { callOllama, htmlToPlainText, ExtractionUnavailableError, repairTruncatedJsonArray } from "@/server/services/fact-extraction";
 
 /**
  * Structured event-fact extraction — the event counterpart to
@@ -165,7 +165,10 @@ Do not guess. Only include an event if a real date is clearly stated for it. If 
 
   let raw: string;
   try {
-    raw = await callOllama(prompt);
+    // A list of up to 10 events needs far more than the 200-token default
+    // sized for a single fact — see callOllama's docstring for the real,
+    // live-observed truncation bug this fixes.
+    raw = await callOllama(prompt, 1200);
   } catch (err) {
     if (err instanceof ExtractionUnavailableError) throw err;
     throw new ExtractionUnavailableError("AI_UNREACHABLE", `Ollama'ya ulaşılamadı (${config.OLLAMA_BASE_URL}).`);
@@ -178,7 +181,13 @@ Do not guess. Only include an event if a real date is clearly stated for it. If 
   try {
     parsedJson = JSON.parse(jsonMatch[0]);
   } catch {
-    return [];
+    // The response was cut off mid-generation — salvage whichever events
+    // completed before the truncation rather than losing all of them.
+    const salvaged = repairTruncatedJsonArray(raw, "events");
+    return salvaged
+      .map((item) => eventListItemSchema.safeParse(item))
+      .filter((r) => r.success)
+      .map((r) => r.data);
   }
 
   const validated = eventListSchema.safeParse(parsedJson);

@@ -36,6 +36,21 @@ const ROBOTS_NAMESPACE = "robots-txt";
 const ROBOTS_TTL_MS = 1000 * 60 * 60 * 24; // 1 day
 
 /**
+ * Decodes numeric HTML character references (`&#58;`, `&#x3A;`) and the
+ * handful of named entities that show up in an href attribute. Real,
+ * live-observed case: some site themes emit `href="http&#x3A;&#x2F;&#x2F;
+ * example.com&#x2F;menu"` — a legitimate, if unusual, real-world pattern,
+ * not malformed markup — which `new URL()` cannot parse at all until the
+ * entities are decoded back to `:` and `/` first.
+ */
+function decodeHrefEntities(raw: string): string {
+  return raw
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCharCode(Number(dec)))
+    .replace(/&amp;/g, "&");
+}
+
+/**
  * Extracts absolute, same-domain, deduplicated link URLs from a page's raw
  * HTML. Deliberately a lightweight regex scan rather than a full DOM parser
  * — this project has no HTML-parsing dependency, and a fact-specific link's
@@ -56,7 +71,7 @@ export function extractSameDomainLinks(html: string, baseUrl: string): string[] 
 
   let match: RegExpExecArray | null;
   while ((match = hrefRe.exec(html)) !== null) {
-    const raw = match[1].trim();
+    const raw = decodeHrefEntities(match[1].trim());
     if (!raw || raw.startsWith("javascript:") || raw.startsWith("mailto:") || raw.startsWith("tel:")) continue;
     let resolved: URL;
     try {
