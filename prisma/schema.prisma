@@ -138,6 +138,7 @@ model Place {
   visits      Visit[]
   activities  TripActivity[]
   bucketItems BucketListItem[]
+  menuItems   MenuItem[]
 
   /// Bounding-box lookups for the map.
   @@index([lat, lng])
@@ -146,6 +147,48 @@ model Place {
   @@index([sourceType])
   @@index([categoryId])
   @@index([deletedAt])
+}
+
+/// One extracted menu item for a restaurant/cafe/bakery Place — Priority 3
+/// (restaurant intelligence) explicitly does not model a restaurant as one
+/// generic price; a real menu has categories (starters/mains/desserts),
+/// individual items, and per-item prices that vary far more than a single
+/// "average cost" figure would suggest.
+///
+/// Rows created by the autonomous autoplan pipeline are transient research
+/// output (never written here — see restaurant.ts's docstring) unless a user
+/// explicitly saves the restaurant as a Place; this table exists so that save
+/// path has somewhere real to persist what was actually extracted.
+model MenuItem {
+  id      String @id @default(cuid())
+  placeId String
+
+  /// e.g. "Starters", "Main Courses", "Desserts", "Drinks" — as stated by the source, not a fixed enum.
+  category    String
+  name        String
+  description String?
+  price       Float?
+  currency    String?
+  /// Portion/size as stated, e.g. "0.5L", "Large", "250g" — free text, not normalized.
+  portion     String?
+  isLocalSpecialty Boolean @default(false)
+  isVegetarian     Boolean @default(false)
+  isVegan          Boolean @default(false)
+
+  /// standard | minimum | reduced — same vocabulary as price-guard.ts's PriceGuardResult, null when price is unset/unverified.
+  priceType  String?
+  /// web-research | osm | unverified
+  source     String  @default("unverified")
+  /// The source page snippet the price/name was actually verified against, for transparency.
+  sourceText String?
+  confidence Float?
+  checkedAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  place Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([placeId])
 }
 
 /// Why a place was saved. One canonical place may have many origins — the same

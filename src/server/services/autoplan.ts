@@ -14,6 +14,13 @@ import { validateExtractedOpeningHours } from "@/server/services/opening-hours-g
 import { validateExtractedPrice } from "@/server/services/price-guard";
 import { extractEventFactsFromText, extractEventListFromText } from "@/server/services/event-extraction";
 import { validateExtractedEvent } from "@/server/services/event-guard";
+import {
+  researchRestaurant,
+  researchLocalFood,
+  restaurantStopInput,
+  type RestaurantResearchResult,
+  type LocalFoodResult,
+} from "@/server/services/restaurant";
 import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
@@ -85,6 +92,14 @@ export interface AutoplanRequest {
    * for opening hours/prices applies directly.
    */
   eventQueries?: string[];
+  /**
+   * Free-text food preferences ("vegan", "seafood", "budget-friendly") used
+   * as a real scoring signal for restaurant selection (spec §Priority 3.2) —
+   * matched against an OSM `cuisine` tag and extracted menu items' local-
+   * specialty flags, never used to fabricate a cuisine a candidate doesn't
+   * actually have.
+   */
+  foodPreferences?: string[];
 }
 
 export interface StopProvenance {
@@ -175,6 +190,10 @@ export interface AutoplanResult {
   budgetWarning: string | null;
   /** One entry per requested `eventQueries` item — what was researched and what happened to it. Empty when none were requested. */
   events: EventResearchResult[];
+  /** Autonomous restaurant discovery/selection for a meal that fits the trip (spec §Priority 3). */
+  restaurant: RestaurantResearchResult;
+  /** Destination-level local food facts (spec §Priority 3.6) — independent of which restaurant, if any, was selected. */
+  localFood: LocalFoodResult;
   departureSafety: DepartureSafetyResult;
   /** Real robustness check: re-runs the same deterministic optimizer, same real matrix, with the start time pushed back by each increment. No new network calls. */
   delaySimulation: DelaySimulationResult[];
@@ -253,6 +272,11 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
 
   const start = req.startLocation ?? { ...center, name: req.destination };
 
+  // Computed early (not just at routing time) because restaurant meal-window
+  // selection needs the real effective end-of-day before the optimizer runs.
+  const departureBufferMinutes = Math.max(0, req.departureBufferMinutes ?? 0);
+  const effectiveDayEnd = subtractMinutes(req.departureTime, departureBufferMinutes);
+
   // --- 2. autonomous POI discovery (OSM) -----------------------------------
   let discovered;
   try {
@@ -288,6 +312,12 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   const scored = scoreCandidates(discovered, center);
   const weights = Object.fromEntries((req.interests ?? []).map((cat) => [cat, 3]));
   const shortlist = pruneAndDiversify(scored, maxStops * SHORTLIST_MULTIPLIER, weights);
+  // Every OSM restaurant candidate, not just the ones that made the general
+  // attraction shortlist — pruneAndDiversify's category round-robin can
+  // easily leave real restaurant candidates out entirely when interests skew
+  // toward other categories, which would silently starve restaurant research
+  // of anything to consider.
+  const restaurantCandidates = scored.filter((c) => c.category === "restaurant");
 
   // --- 4. opening-hours resolution (OSM first, web research second) -------
   const caps = await getCapabilities();
@@ -720,14 +750,80 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     });
   }
 
-  // --- 5. real routing + the EXISTING deterministic optimizer --------------
-  const departureBufferMinutes = Math.max(0, req.departureBufferMinutes ?? 0);
-  // Tightens the effective end-of-day time the optimizer schedules against,
-  // rather than adding a second, parallel "did we make the departure" check
-  // — a schedule that overruns this earlier cutoff surfaces through the
-  // optimizer's own existing, already-tested "day-overrun" conflict.
-  const effectiveDayEnd = subtractMinutes(req.departureTime, departureBufferMinutes);
+  // --- 4c. restaurant + local food intelligence (spec §Priority 3) --------
+  // Runs before the optimizer, not after: a selected restaurant becomes a
+  // real StopInput pushed into finalStops here, so the FIRST routeAndOptimize
+  // call below inserts it at its real cheapest-feasible position within its
+  // meal window — the same "insert into the optimizer, don't append"
+  // discipline as event scheduling above, not a separate pass tacked onto a
+  // finished itinerary.
+  const routeReferencePoint =
+    finalStops.length > 0
+      ? {
+          lat: finalStops.reduce((s, x) => s + x.input.lat, 0) / finalStops.length,
+          lng: finalStops.reduce((s, x) => s + x.input.lng, 0) / finalStops.length,
+        }
+      : center;
+  const spentSoFar = finalStops.reduce((s, x) => s + (x.input.estimatedCost ?? 0), 0);
+  const remainingBudget = req.budget != null ? Math.max(0, req.budget - spentSoFar) : undefined;
 
+  const [restaurant, localFood] = await Promise.all([
+    researchRestaurant({
+      restaurantCandidates,
+      destination: req.destination,
+      tripDate,
+      routeReferencePoint,
+      arrivalTime: req.arrivalTime,
+      dayEnd: effectiveDayEnd,
+      searchAvailable,
+      aiAvailable,
+      foodPreferences: req.foodPreferences,
+      remainingBudget,
+      currency: req.currency,
+    }),
+    researchLocalFood(req.destination, searchAvailable, aiAvailable),
+  ]);
+
+  if (restaurant.status === "scheduled" && restaurant.selected) {
+    const sel = restaurant.selected;
+    finalStops.push({
+      input: restaurantStopInput(sel),
+      scored: {
+        place: { id: sel.stopId, name: sel.name, lat: sel.lat, lng: sel.lng, osmTag: "amenity", osmValue: "restaurant", tags: {}, source: "osm" },
+        category: "restaurant",
+        notabilityScore: 0,
+        distanceFromCenterMeters: 0,
+      },
+    });
+    provenance.push({
+      stopId: sel.stopId,
+      name: sel.name,
+      category: "restaurant",
+      openingHoursSource: sel.openingHoursSource,
+      openingHoursConfidence: sel.openingHoursConfidence,
+      priceSource: sel.estimatedMealCost != null ? "web-research" : "unverified",
+      priceConfidence: sel.estimatedMealCost != null ? "medium" : "unknown",
+      summarySource: "none",
+    });
+    trace.push({
+      stage: "restaurant",
+      status: "ok",
+      detail: `${sel.name} seçildi (${sel.mealWindow}, ${sel.menuItems.length} menü öğesi, ${restaurant.consideredCount} aday araştırıldı) — ${sel.selectionReason}`,
+    });
+  } else {
+    trace.push({
+      stage: "restaurant",
+      status: restaurant.status === "no-meal-window" ? "skipped" : "failed",
+      detail: `${restaurant.status}${restaurant.reason ? `: ${restaurant.reason}` : ""} (${restaurant.consideredCount} aday değerlendirildi)`,
+    });
+  }
+  trace.push({
+    stage: "local-food",
+    status: localFood.status === "found" ? "ok" : localFood.status === "research-unavailable" ? "skipped" : "failed",
+    detail: localFood.status === "found" ? `yerel yemek bilgisi bulundu (${localFood.source})` : (localFood.reason ?? localFood.status),
+  });
+
+  // --- 5. real routing + the EXISTING deterministic optimizer --------------
   async function routeAndOptimize(
     stopsForRoute: Array<{ input: StopInput }>,
     stageLabel: string
@@ -958,6 +1054,8 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     budgetOptimization,
     budgetWarning,
     events,
+    restaurant,
+    localFood,
     departureSafety,
     delaySimulation,
     fragileAtMinutes,

@@ -162,6 +162,7 @@ export const autoplanRequestSchema = z.object({
   mustSeeNames: z.array(z.string().trim().min(1).max(200)).max(10).optional(),
   eventQueries: z.array(z.string().trim().min(1).max(200)).max(3).optional(),
   departureBufferMinutes: z.number().int().min(0).max(240).optional(),
+  foodPreferences: z.array(z.string().trim().min(1).max(60)).max(10).optional(),
 });
 
 export const optimizeRequestSchema = z.object({
