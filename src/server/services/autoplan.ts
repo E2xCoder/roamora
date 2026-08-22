@@ -10,7 +10,8 @@ import {
   htmlToPlainText,
   ExtractionUnavailableError,
 } from "@/server/services/fact-extraction";
-import { validateExtractedOpeningHours, isSupportedBySource } from "@/server/services/opening-hours-guard";
+import { validateExtractedOpeningHours } from "@/server/services/opening-hours-guard";
+import { validateExtractedPrice } from "@/server/services/price-guard";
 import { scoreConfidence, isOfficialSource, detectStaleness, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
@@ -71,6 +72,8 @@ export interface StopProvenance {
   openingHoursConfidence: ConfidenceLevel;
   priceSource: "web-research" | "unverified";
   priceConfidence: ConfidenceLevel;
+  /** Set only when priceSource is "web-research" — a "minimum"/"reduced" price is real and textually-supported, but not what a typical traveller pays. */
+  priceType?: "standard" | "minimum" | "reduced";
   summarySource: "wikipedia" | "none";
   summaryText?: string;
   summaryUrl?: string;
@@ -284,6 +287,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
 
     let priceSource: StopProvenance["priceSource"] = "unverified";
     let priceConfidence: StopProvenance["priceConfidence"] = "unknown";
+    let priceType: StopProvenance["priceType"];
     let estimatedCost: number | undefined;
 
     // Web research only for gaps OSM left, and only up to a hard call budget.
@@ -365,17 +369,20 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
                 // which nothing here tracks) / "unknown" all leave the stop
                 // unconstrained, same as no web-research data at all.
               }
-              if (facts.facts.priceAmount != null) {
-                const priceText = `${facts.facts.priceAmount}`;
-                const priceSupported =
-                  isSupportedBySource(priceText, sourceText) ||
-                  (facts.facts.priceCurrency != null && isSupportedBySource(facts.facts.priceCurrency, sourceText));
-                estimatedCost = facts.facts.priceAmount;
+              const priceGuardResult = validateExtractedPrice(facts.facts.priceAmount, facts.facts.priceCurrency, sourceText);
+              if (priceGuardResult.status !== "unknown") {
+                // A minimum ("from €X") or reduced (child/student) fare is a
+                // real, textually-supported number, but not the price most
+                // travellers will actually pay — accepted (never invented),
+                // just never at the same confidence as a plain standard price.
+                const priceTypeAmbiguous = priceGuardResult.status !== "valid";
+                estimatedCost = priceGuardResult.amount;
+                priceType = priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced";
                 priceSource = "web-research";
                 priceConfidence = scoreConfidence({
-                  textuallySupported: priceSupported,
+                  textuallySupported: true, // the guard already required this to reach a non-"unknown" status
                   officialSource: official,
-                  extractionAmbiguous: facts.facts.priceCurrency == null,
+                  extractionAmbiguous: priceTypeAmbiguous || facts.facts.priceCurrency == null,
                   stale,
                   multiSourceAgreement: null, // price cross-checking is not implemented — one extra fetch per fact would double the already-bounded research budget
                 });
@@ -434,6 +441,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       openingHoursConfidence: openingConfidence,
       priceSource,
       priceConfidence,
+      priceType,
       summarySource,
       summaryText,
       summaryUrl,
