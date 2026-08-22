@@ -7,7 +7,7 @@ import { extractFactsFromText, htmlToPlainText, ExtractionUnavailableError } fro
 import { validateExtractedOpeningHours } from "@/server/services/opening-hours-guard";
 import { validateExtractedPrice } from "@/server/services/price-guard";
 import { extractMenuFromText, extractLocalFoodFromText, type ExtractedMenuItem } from "@/server/services/restaurant-extraction";
-import { isMenuItemNameSupported, estimateQueueSignal, scoreTouristTrapRisk, type QueueEstimate, type TouristTrapRisk } from "@/server/services/restaurant-guard";
+import { isMenuItemNameSupported, isLikelyNavigationLabel, estimateQueueSignal, scoreTouristTrapRisk, type QueueEstimate, type TouristTrapRisk } from "@/server/services/restaurant-guard";
 import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { resolveResearchSource } from "@/server/services/direct-research";
@@ -373,6 +373,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
             const extracted = await extractMenuFromText(p.name, source.text);
             menuItems = extracted
               .filter((item: ExtractedMenuItem) => isMenuItemNameSupported(item.name, sourceText)) // never invented — must actually be on the page
+              .filter((item: ExtractedMenuItem) => !isLikelyNavigationLabel(item.name)) // not a nav/category link mistaken for a dish (real case: fulumandarijn.com/menu's "Food Menu"/"Drink Menu"/"Member Menu"/"Home Menu")
               .map((item: ExtractedMenuItem): MenuItemResult => {
                 const priceGuardResult = validateExtractedPrice(item.price, item.currency, sourceText);
                 const hasPrice = priceGuardResult.status !== "unknown";

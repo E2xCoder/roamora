@@ -19,6 +19,64 @@ export function isMenuItemNameSupported(itemName: string, sourceText: string): b
   return isSupportedBySource(itemName, sourceText);
 }
 
+const NAV_LABEL_EXACT = new Set([
+  "menu", "full menu", "our menu", "see menu", "download menu",
+  "order now", "book now", "reserve now", "reserve a table", "book a table", "buy now",
+  "add to cart", "add to basket", "learn more", "read more", "see more", "click here", "shop now",
+  "sign in", "log in", "sign up", "register", "checkout", "cart", "basket",
+  "home", "about", "about us", "contact", "contact us", "gallery", "reservations", "reservation",
+  "location", "locations", "hours", "opening hours", "directions", "faq", "careers", "jobs",
+  "privacy policy", "terms of service", "terms & conditions", "cookie policy",
+  // multilingual, matching the codebase's existing multilingual practice
+  "speisekarte ansehen", "jetzt bestellen", "tisch reservieren", // German
+  "zobacz menu", "zamów teraz", "zarezerwuj stolik", // Polish
+  "menüyü görüntüle", "şimdi sipariş ver", // Turkish
+]);
+
+const GENERIC_MENU_LABEL_RE = /^(the\s+)?(food|drinks?|members?|home|main|full|our|view|see|download|order|online)\s+menu$/;
+const CUISINE_LABEL_RE = /^[a-z][a-z-]*\s+cuisine$/;
+const CTA_RE = /^(order|book|reserve|buy|add|view|see|click|read|shop|learn|download|sign|log)\b.*\b(now|more|here|in|up)$/;
+
+/**
+ * Rejects an extracted "menu item" that is really a navigation label, a
+ * menu-section/category link, a button, or generic UI text — real,
+ * live-observed failure: a real official menu page
+ * (fulumandarijn.com/menu) is itself a landing/navigation hub linking out
+ * to separate sub-pages, and the model extracted its nav labels ("Food
+ * Menu", "Drink Menu", "Member Menu", "Home Menu") as if they were dish
+ * names. `isMenuItemNameSupported` alone cannot catch this — the text IS
+ * genuinely present on the page, it just isn't a dish.
+ *
+ * Deliberately narrow and pattern-based rather than a vague "looks
+ * generic" heuristic, so a real short dish name ("Fries", "Coffee") or a
+ * real prix-fixe item ("Tasting Menu", "Chef's Menu", "Kids Menu" — all
+ * genuinely orderable, often individually priced) is never rejected.
+ */
+export function isLikelyNavigationLabel(name: string): boolean {
+  const normalized = name.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized) return true;
+
+  if (NAV_LABEL_EXACT.has(normalized)) return true;
+
+  // "<generic qualifier> menu" — e.g. "Food Menu", "Drink Menu", "View
+  // Menu", "Member Menu", "Home Menu" — a category/nav link, never a real
+  // dish name. Curated qualifier list rather than a blanket "-menu"
+  // suffix rule, since a bare suffix rule would also reject genuinely
+  // orderable items like "Tasting Menu" or "Chef's Menu".
+  if (GENERIC_MENU_LABEL_RE.test(normalized)) return true;
+
+  // A bare "<style/nationality> Cuisine" label ("Sichuan Cuisine",
+  // "Italian Cuisine") is a category tag, never a specific dish — unlike
+  // "menu", no real menu item is ever named just "X Cuisine".
+  if (CUISINE_LABEL_RE.test(normalized)) return true;
+
+  // Call-to-action phrasing: a verb the page uses to prompt an action,
+  // not a food/drink name.
+  if (CTA_RE.test(normalized)) return true;
+
+  return false;
+}
+
 export type QueueConfidence = "low" | "medium";
 
 export interface QueueEstimate {

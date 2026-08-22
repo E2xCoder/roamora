@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMenuItemNameSupported, estimateQueueSignal, scoreTouristTrapRisk } from "@/server/services/restaurant-guard";
+import { isMenuItemNameSupported, isLikelyNavigationLabel, estimateQueueSignal, scoreTouristTrapRisk } from "@/server/services/restaurant-guard";
 
 describe("isMenuItemNameSupported", () => {
   it("accepts a menu item name actually present in the source", () => {
@@ -8,6 +8,63 @@ describe("isMenuItemNameSupported", () => {
 
   it("rejects a menu item name with no textual support (hallucination-shaped)", () => {
     expect(isMenuItemNameSupported("Lobster Thermidor", "Nasze menu: Pierogi Ruskie 25 zł, Żurek 18 zł")).toBe(false);
+  });
+});
+
+describe("isLikelyNavigationLabel", () => {
+  it(
+    "real case: rejects every navigation label extracted from fulumandarijn.com/menu — a real " +
+      "official menu page that is itself a landing/nav hub, whose nav labels the model mistook " +
+      "for dish names ('Sichuan Cuisine', 'Food Menu', 'Drink Menu', 'Member Menu', 'Home Menu')",
+    () => {
+      expect(isLikelyNavigationLabel("Food Menu")).toBe(true);
+      expect(isLikelyNavigationLabel("Drink Menu")).toBe(true);
+      expect(isLikelyNavigationLabel("Member Menu")).toBe(true);
+      expect(isLikelyNavigationLabel("Home Menu")).toBe(true);
+      expect(isLikelyNavigationLabel("Sichuan Cuisine")).toBe(true);
+    }
+  );
+
+  it("rejects the spec's explicit generic-UI examples", () => {
+    expect(isLikelyNavigationLabel("View Menu")).toBe(true);
+    expect(isLikelyNavigationLabel("Order Now")).toBe(true);
+  });
+
+  it("rejects common button/link text regardless of case or spacing", () => {
+    expect(isLikelyNavigationLabel("book now")).toBe(true);
+    expect(isLikelyNavigationLabel("  ADD TO CART  ")).toBe(true);
+    expect(isLikelyNavigationLabel("Reserve a Table")).toBe(true);
+    expect(isLikelyNavigationLabel("Sign In")).toBe(true);
+    expect(isLikelyNavigationLabel("Contact Us")).toBe(true);
+  });
+
+  it("rejects multilingual nav/CTA text", () => {
+    expect(isLikelyNavigationLabel("Jetzt bestellen")).toBe(true);
+    expect(isLikelyNavigationLabel("Zobacz menu")).toBe(true);
+    expect(isLikelyNavigationLabel("Şimdi sipariş ver")).toBe(true);
+  });
+
+  it("rejects an empty or whitespace-only name", () => {
+    expect(isLikelyNavigationLabel("")).toBe(true);
+    expect(isLikelyNavigationLabel("   ")).toBe(true);
+  });
+
+  it("does NOT reject a real, genuinely orderable 'X Menu' prix-fixe item", () => {
+    expect(isLikelyNavigationLabel("Tasting Menu")).toBe(false);
+    expect(isLikelyNavigationLabel("Chef's Menu")).toBe(false);
+    expect(isLikelyNavigationLabel("Kids Menu")).toBe(false);
+  });
+
+  it("does NOT reject real, ordinary dish and drink names", () => {
+    expect(isLikelyNavigationLabel("Wiener Schnitzel")).toBe(false);
+    expect(isLikelyNavigationLabel("Fries")).toBe(false);
+    expect(isLikelyNavigationLabel("Coffee")).toBe(false);
+    expect(isLikelyNavigationLabel("Pierogi Ruskie")).toBe(false);
+    expect(isLikelyNavigationLabel("Sichuan Mapo Tofu")).toBe(false);
+  });
+
+  it("does NOT reject a real dish whose description happens to mention a cuisine style", () => {
+    expect(isLikelyNavigationLabel("Sichuan-Style Mapo Tofu")).toBe(false);
   });
 });
 
