@@ -14,7 +14,7 @@ import { validateExtractedOpeningHours } from "@/server/services/opening-hours-g
 import { validateExtractedPrice } from "@/server/services/price-guard";
 import { extractEventFactsFromText } from "@/server/services/event-extraction";
 import { validateExtractedEvent } from "@/server/services/event-guard";
-import { scoreConfidence, isOfficialSource, detectStaleness, type ConfidenceLevel } from "@/server/services/confidence";
+import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
 import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS } from "@/server/services/otp-matrix";
@@ -331,15 +331,14 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
           `"${p.name}" ${req.destination} official opening hours price`,
           5
         );
-        // Prefer the first result that looks like the place's own site over
-        // blindly taking the top-ranked result — measured live against 15
-        // real candidates, the literal top hit was wrong far more often than
-        // not (an unrelated company sharing an abbreviation, a Wikipedia
-        // disambiguation stub, a generic city-tourism blog), while a real
-        // official page was frequently sitting a few positions down,
-        // unused. Falls back to the top result when nothing looks official,
-        // rather than skipping research entirely.
-        const page = results.find((r) => isOfficialSource(r.url, r.title, p.name)) ?? results[0];
+        // Prefer the result that looks like the place's own site, using
+        // engine agreement/score as tie-breakers among candidates — measured
+        // live against 15 real candidates, the literal top hit was wrong far
+        // more often than not (an unrelated company sharing an
+        // abbreviation, a Wikipedia disambiguation stub, a generic
+        // city-tourism blog), while a real official page was frequently
+        // sitting a few positions down, unused.
+        const page = selectBestResult(results, p.name);
         if (page) {
           const fetched = await fetchTextCapped(page.url);
           if (fetched.ok) {
@@ -497,7 +496,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     }
     try {
       const results = await searxngProvider.searchWeb(`"${query}" official program dates`, 5);
-      const page = results.find((r) => isOfficialSource(r.url, r.title, query)) ?? results[0];
+      const page = selectBestResult(results, query);
       if (!page) {
         events.push({ query, status: "not-found", reason: "arama sonucu yok" });
         continue;

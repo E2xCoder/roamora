@@ -2,6 +2,7 @@ import "server-only";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { config } from "@/server/config";
+import { getDegradationSummary } from "@/server/providers/research/engine-health";
 
 const execAsync = promisify(exec);
 
@@ -154,6 +155,28 @@ async function probeSearxng(): Promise<Capability> {
 
   if (!res.ok) {
     return cap("search", "unhealthy", `SearXNG ${res.status} döndürdü (${config.SEARXNG_URL})`, "SearXNG konteynerinin loglarını kontrol et: `docker compose logs searxng`");
+  }
+
+  // The container being reachable doesn't mean its upstream engines are —
+  // this session's own real, observed engine-health data (from
+  // unresponsive_engines on actual search responses) is a more honest
+  // signal than a bare "available", which real degradation would otherwise
+  // hide behind.
+  const { downCount, totalKnown } = getDegradationSummary();
+  if (totalKnown > 0 && downCount === totalKnown) {
+    return cap(
+      "search",
+      "unhealthy",
+      `SearXNG erişilebilir ama gözlemlenen ${totalKnown} motorun tamamı şu an yanıt vermiyor (${config.SEARXNG_URL})`,
+      "Muhtemelen geçici bir motor engellemesi — birkaç dakika sonra tekrar dene, ya da `docker compose logs searxng` ile kontrol et."
+    );
+  }
+  if (downCount > 0) {
+    return cap(
+      "search",
+      "available",
+      `SearXNG (${config.SEARXNG_URL}) — ${downCount}/${totalKnown} motor şu an yanıt vermiyor, arama yine de çalışıyor`
+    );
   }
 
   return cap("search", "available", `SearXNG (${config.SEARXNG_URL})`);

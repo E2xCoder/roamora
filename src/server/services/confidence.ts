@@ -1,4 +1,5 @@
 import "server-only";
+import type { WebSearchResult } from "@/server/providers/research/types";
 
 /**
  * Evidence-based confidence scoring for web-research-derived facts.
@@ -138,4 +139,29 @@ export function detectStaleness(sourceText: string, now: Date = new Date()): boo
   if (!match) return false;
   const year = Number(match[2]);
   return now.getFullYear() - year > 1;
+}
+
+/**
+ * Ranks search results for "which one should we actually fetch", rather
+ * than the previous plain `results.find(isOfficial) ?? results[0]` — that
+ * found the first official-looking result, but among several equally
+ * official-looking (or several equally non-official) candidates it still
+ * fell back to whichever SearXNG happened to rank first. This uses SearXNG's
+ * own real per-result signals (its relevance `score`, and `engineAgreement`
+ * — how many independent upstream engines returned the same URL) as
+ * tie-breakers: official-ness first, then agreement across engines (a real
+ * corroboration signal), then SearXNG's own score.
+ */
+export function selectBestResult(results: WebSearchResult[], placeName: string): WebSearchResult | undefined {
+  if (results.length === 0) return undefined;
+  const ranked = [...results].sort((a, b) => {
+    const officialA = isOfficialSource(a.url, a.title, placeName) ? 1 : 0;
+    const officialB = isOfficialSource(b.url, b.title, placeName) ? 1 : 0;
+    if (officialA !== officialB) return officialB - officialA;
+    const agreementA = a.engineAgreement ?? 0;
+    const agreementB = b.engineAgreement ?? 0;
+    if (agreementA !== agreementB) return agreementB - agreementA;
+    return (b.score ?? 0) - (a.score ?? 0);
+  });
+  return ranked[0];
 }

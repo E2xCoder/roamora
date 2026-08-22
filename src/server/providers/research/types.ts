@@ -13,6 +13,10 @@ export interface WebSearchResult {
   title: string;
   url: string;
   snippet: string;
+  /** SearXNG's own relevance score for this result, when the provider exposes one. Higher is more relevant. */
+  score?: number;
+  /** How many distinct upstream engines independently returned this same URL — real agreement, not a guess. */
+  engineAgreement?: number;
 }
 
 export interface ResearchProvider {

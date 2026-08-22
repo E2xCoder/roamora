@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { scoreConfidence, isOfficialSource, detectStaleness } from "@/server/services/confidence";
+import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult } from "@/server/services/confidence";
+import type { WebSearchResult } from "@/server/providers/research/types";
 
 describe("scoreConfidence", () => {
   it("official source + exact price found (unambiguous, not stale) -> HIGH", () => {
@@ -178,5 +179,64 @@ describe("detectStaleness", () => {
 
   it("does not flag an unrelated year mention (e.g. a founding year) as an update marker", () => {
     expect(detectStaleness("Founded in 1885. Hours: Mo-Fr 9-17.", new Date("2026-08-21"))).toBe(false);
+  });
+});
+
+function result(overrides: Partial<WebSearchResult> = {}): WebSearchResult {
+  return { title: "Result", url: "https://example.com/", snippet: "", ...overrides };
+}
+
+describe("selectBestResult", () => {
+  it(
+    "real case: prefers the official result even when it is not first " +
+      "(Anne Frank House — index 0 was a Wikipedia disambiguation stub for the name " +
+      '"Anne", the real official ticket page was further down the list)',
+    () => {
+      const results = [
+        result({ title: "Anne – Wikipedia", url: "https://de.m.wikipedia.org/wiki/Anne" }),
+        result({ title: "Tickets | Anne Frank House", url: "https://www.annefrank.org/en/museum/tickets/" }),
+      ];
+      expect(selectBestResult(results, "Anne Frank House")?.url).toBe("https://www.annefrank.org/en/museum/tickets/");
+    }
+  );
+
+  it(
+    "known, documented limitation: cannot match a place name against a foreign-language " +
+      'domain with no shared words (real case: "St. Vitus Cathedral" vs the real official ' +
+      'site katedralasvatehovita.cz, Czech for "cathedral of St. Vitus") — correctly falls ' +
+      "back to the first result rather than guessing, since neither looks official by this " +
+      "heuristic",
+    () => {
+      const results = [
+        result({ title: "STMicroelectronics: Our technology starts with you", url: "https://www.st.com/content/st_com/en.html" }),
+        result({ title: "For visitors - Katedrála svatého Víta", url: "https://www.katedralasvatehovita.cz/en/for-visitors/" }),
+      ];
+      expect(selectBestResult(results, "St. Vitus Cathedral")?.url).toBe("https://www.st.com/content/st_com/en.html");
+    }
+  );
+
+  it("among two non-official results, prefers higher engine agreement over plain rank order", () => {
+    const results = [
+      result({ title: "Weak match", url: "https://blog.example/a", engineAgreement: 1 }),
+      result({ title: "Strong cross-engine agreement", url: "https://blog.example/b", engineAgreement: 3 }),
+    ];
+    expect(selectBestResult(results, "Some Place")?.url).toBe("https://blog.example/b");
+  });
+
+  it("falls back to SearXNG's own score as a tie-breaker when agreement is equal", () => {
+    const results = [
+      result({ title: "Lower score", url: "https://blog.example/a", engineAgreement: 1, score: 2 }),
+      result({ title: "Higher score", url: "https://blog.example/b", engineAgreement: 1, score: 9 }),
+    ];
+    expect(selectBestResult(results, "Some Place")?.url).toBe("https://blog.example/b");
+  });
+
+  it("preserves original order among true ties (stable sort, no arbitrary reshuffling)", () => {
+    const results = [result({ url: "https://a.example/" }), result({ url: "https://b.example/" })];
+    expect(selectBestResult(results, "Some Place")?.url).toBe("https://a.example/");
+  });
+
+  it("returns undefined for an empty result list", () => {
+    expect(selectBestResult([], "Some Place")).toBeUndefined();
   });
 });
