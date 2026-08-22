@@ -27,6 +27,7 @@ import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
 import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS } from "@/server/services/otp-matrix";
 import { planBudgetOptimization, type BudgetOptimizationResult } from "@/server/services/budget-optimizer";
+import { findHiddenGemsNearCorridor } from "@/server/services/hidden-gem";
 import {
   optimizeItinerary,
   type StopInput,
@@ -157,6 +158,21 @@ export interface EventResearchResult {
   reason?: string;
 }
 
+/** One place found via the route-aware hidden-gem engine (spec §Priority 5) — real distance to the actual route corridor, not a guess. */
+export interface HiddenGemFound {
+  stopId: string;
+  name: string;
+  category: string;
+  distanceMeters: number;
+  radiusTierMeters: number;
+}
+
+export interface HiddenGemResult {
+  status: "found" | "none" | "skipped";
+  found: HiddenGemFound[];
+  reason?: string;
+}
+
 /**
  * Real counts behind the cost caps that bound this run — the caps exist to
  * keep a single plan from making unbounded outbound calls, but silently
@@ -208,6 +224,8 @@ export interface AutoplanResult {
   restaurant: RestaurantResearchResult;
   /** Destination-level local food facts (spec §Priority 3.6) — independent of which restaurant, if any, was selected. */
   localFood: LocalFoodResult;
+  /** Route-aware hidden-gem engine result (spec §Priority 5) — real places found near the actual route corridor and re-inserted into the optimizer, not appended. */
+  hiddenGems: HiddenGemResult;
   departureSafety: DepartureSafetyResult;
   /** Real robustness check: re-runs the same deterministic optimizer, same real matrix, with the start time pushed back by each increment. No new network calls. */
   delaySimulation: DelaySimulationResult[];
@@ -959,6 +977,100 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       .map((s) => s.input.id)
   );
 
+  // --- 5b. route-aware hidden-gem engine (spec §Priority 5) ----------------
+  // Needs the route's real geometry, so this can only run AFTER the first
+  // itinerary exists — real corridor, not a guess from the destination's
+  // center. Entirely network-free: re-filters the SAME candidates already
+  // discovered for the whole destination (scored, from step 3) by real
+  // distance to the actual path, escalating 100/200/300m. A find is
+  // inserted into finalStops and the WHOLE optimizer is re-run — never
+  // appended to the finished schedule — so it competes for a real slot
+  // exactly like any other stop and can still be dropped later by budget
+  // or departure-safety replanning if the day doesn't have room for it.
+  let hiddenGems: HiddenGemResult = { status: "none", found: [] };
+  const orderedRoutePoints = [
+    start,
+    ...[...itinerary.stops].sort((a, b) => a.order - b.order).map((s) => ({ lat: s.lat, lng: s.lng })),
+    ...(req.endLocation ? [req.endLocation] : []),
+  ];
+  if (orderedRoutePoints.length < 2) {
+    hiddenGems = { status: "skipped", found: [], reason: "rota için yeterli durak yok" };
+  } else {
+    const usedIds = new Set(finalStops.map((s) => s.input.id));
+    const gemFindings = findHiddenGemsNearCorridor(scored, orderedRoutePoints, usedIds);
+
+    const addedGems: HiddenGemFound[] = [];
+    for (const finding of gemFindings) {
+      const p = finding.candidate.place;
+      let earliestTime: string | undefined;
+      let latestTime: string | undefined;
+      let excludedAsClosed = false;
+
+      const osmHours = p.tags.opening_hours;
+      if (osmHours) {
+        const resolved = resolveOpeningHoursForDate(osmHours, tripDate);
+        if (resolved.status === "closed") {
+          excludedAsClosed = true;
+        } else if (resolved.status === "open" || resolved.status === "always") {
+          const window = widestWindow(resolved);
+          if (window) {
+            earliestTime = window.open;
+            latestTime = window.close;
+          }
+        }
+      }
+      if (excludedAsClosed) continue; // a real gem we know is shut that day is not scheduled
+
+      finalStops.push({
+        input: {
+          id: p.id,
+          name: p.name,
+          lat: p.lat,
+          lng: p.lng,
+          category: finding.candidate.category,
+          earliestTime,
+          latestTime,
+          estimatedCost: p.tags.fee === "no" ? 0 : undefined,
+        },
+        scored: finding.candidate,
+      });
+      provenance.push({
+        stopId: p.id,
+        name: p.name,
+        category: finding.candidate.category,
+        openingHoursSource: osmHours && earliestTime ? "osm" : "unverified",
+        openingHoursConfidence: osmHours && earliestTime ? "high" : "unknown",
+        priceSource: "unverified",
+        priceConfidence: "unknown",
+        summarySource: "none",
+      });
+      addedGems.push({
+        stopId: p.id,
+        name: p.name,
+        category: finding.candidate.category,
+        distanceMeters: Math.round(finding.distanceMeters),
+        radiusTierMeters: finding.radiusTierMeters,
+      });
+    }
+
+    if (addedGems.length > 0) {
+      hiddenGems = { status: "found", found: addedGems };
+      ({ itinerary, transitMetadata, matrix: lastMatrix } = await routeAndOptimize(finalStops, "hidden-gem-reroute"));
+      trace.push({
+        stage: "hidden-gem",
+        status: "ok",
+        detail: `${addedGems.length} gizli hazine bulundu (${addedGems.map((g) => `${g.name}, ${g.distanceMeters} m`).join("; ")}) — plan yeniden optimize edildi`,
+      });
+    } else {
+      hiddenGems = { status: "none", found: [] };
+      trace.push({
+        stage: "hidden-gem",
+        status: "ok",
+        detail: "rota koridorunun 300 m yakınında yeni bir gizli hazine bulunamadı",
+      });
+    }
+  }
+
   // --- 6. real budget replanning, not a passive warning --------------------
   let budgetOptimization: BudgetOptimizationResult | null = null;
   if (req.budget != null) {
@@ -1108,6 +1220,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     events,
     restaurant,
     localFood,
+    hiddenGems,
     departureSafety,
     delaySimulation,
     fragileAtMinutes,
