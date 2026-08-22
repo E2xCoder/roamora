@@ -8,8 +8,9 @@ import { validateExtractedOpeningHours } from "@/server/services/opening-hours-g
 import { validateExtractedPrice } from "@/server/services/price-guard";
 import { extractMenuFromText, extractLocalFoodFromText, type ExtractedMenuItem } from "@/server/services/restaurant-extraction";
 import { isMenuItemNameSupported, estimateQueueSignal, scoreTouristTrapRisk, type QueueEstimate, type TouristTrapRisk } from "@/server/services/restaurant-guard";
-import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
+import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
+import { resolveResearchSource } from "@/server/services/direct-research";
 
 /**
  * Priority 3 — restaurant and menu intelligence.
@@ -98,6 +99,14 @@ export interface RestaurantResearchResult {
   considered: RestaurantCandidateResult[];
   consideredCount: number;
   reason?: string;
+  /** Second-stage direct-research metrics accumulated across every candidate researched — merged into autoplan.ts's overall officialSource metrics. */
+  officialSourceMetrics: {
+    domainAttempted: number;
+    domainResolved: number;
+    pageAttempted: number;
+    pageResolved: number;
+    searchQueriesAvoided: number;
+  };
 }
 
 export interface LocalFoodEntry {
@@ -220,13 +229,17 @@ const CANDIDATE_POOL_SIZE = 8; // closest-to-route OSM candidates actually resea
  * is responsible for that insertion and for re-running `routeAndOptimize`,
  * exactly like autoplan.ts's event scheduling already does.
  */
+function emptyOfficialSourceMetrics() {
+  return { domainAttempted: 0, domainResolved: 0, pageAttempted: 0, pageResolved: 0, searchQueriesAvoided: 0 };
+}
+
 export async function researchRestaurant(params: RestaurantResearchParams): Promise<RestaurantResearchResult> {
   const windows = mealWindowsFor(params.arrivalTime, params.dayEnd);
   if (windows.length === 0) {
-    return { status: "no-meal-window", considered: [], consideredCount: 0, reason: "gezi süresine uyan bir öğün penceresi yok" };
+    return { status: "no-meal-window", considered: [], consideredCount: 0, reason: "gezi süresine uyan bir öğün penceresi yok", officialSourceMetrics: emptyOfficialSourceMetrics() };
   }
   if (params.restaurantCandidates.length === 0) {
-    return { status: "no-candidates", considered: [], consideredCount: 0, reason: "OpenStreetMap'te restoran adayı bulunamadı" };
+    return { status: "no-candidates", considered: [], consideredCount: 0, reason: "OpenStreetMap'te restoran adayı bulunamadı", officialSourceMetrics: emptyOfficialSourceMetrics() };
   }
 
   // Closest-to-route first — real, cheap (haversine, no network) proxy for
@@ -238,6 +251,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     .slice(0, CANDIDATE_POOL_SIZE);
 
   const considered: RestaurantCandidateResult[] = [];
+  const officialSourceMetrics = emptyOfficialSourceMetrics();
   let researchCalls = 0;
 
   for (const { c: candidate, detourMeters } of pool) {
@@ -295,20 +309,35 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     if (wantsResearch) {
       researchCalls++;
       try {
-        const results = await searxngProvider.searchWeb(`"${p.name}" ${params.destination} restaurant menu prices`, 5);
-        const page = selectBestResult(results, p.name);
-        if (page) {
-          const fetched = await fetchTextCapped(page.url);
-          if (fetched.ok) {
-            sourceUrl = page.url;
-            const sourceText = htmlToPlainText(fetched.text);
-            const official = isOfficialSource(page.url, page.title, p.name);
-            const stale = detectStaleness(sourceText);
+        // Second-stage research: resolve the restaurant's own official site
+        // and go straight for its menu page, before falling back to a
+        // generic SearXNG query — the exact fix for the wrong-page-selected
+        // problem measured live in Priority 3 (e.g. a restaurant name
+        // colliding with an unrelated support/Wikipedia/YouTube page).
+        const { source, metrics } = await resolveResearchSource(
+          p.name,
+          params.destination,
+          p.tags,
+          "menu",
+          `"${p.name}" ${params.destination} restaurant menu prices`,
+          params.searchAvailable
+        );
+        officialSourceMetrics.domainAttempted += metrics.officialDomainAttempted ? 1 : 0;
+        officialSourceMetrics.domainResolved += metrics.officialDomainResolved ? 1 : 0;
+        officialSourceMetrics.pageAttempted += metrics.officialPageAttempted ? 1 : 0;
+        officialSourceMetrics.pageResolved += metrics.officialPageResolved ? 1 : 0;
+        officialSourceMetrics.searchQueriesAvoided += metrics.searchQueryAvoided ? 1 : 0;
 
-            // Hours fallback when OSM had none — same guard as the main loop.
-            if (!osmHours) {
-              const facts = await extractFactsFromText(p.name, fetched.text);
-              if (facts) {
+        if (source) {
+          sourceUrl = source.url;
+          const sourceText = htmlToPlainText(source.text);
+          const official = source.official;
+          const stale = detectStaleness(sourceText);
+
+          // Hours fallback when OSM had none — same guard as the main loop.
+          if (!osmHours) {
+            const facts = await extractFactsFromText(p.name, source.text);
+            if (facts) {
                 const guardResult = validateExtractedOpeningHours(facts.facts.openingHoursText, facts.facts.hoursScope, sourceText);
                 if (guardResult.status === "specific-hours") {
                   const resolved = resolveOpeningHoursForDate(guardResult.osmSyntax, params.tripDate);
@@ -340,39 +369,38 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
               }
             }
 
-            if (!excludedAsClosed) {
-              const extracted = await extractMenuFromText(p.name, fetched.text);
-              menuItems = extracted
-                .filter((item: ExtractedMenuItem) => isMenuItemNameSupported(item.name, sourceText)) // never invented — must actually be on the page
-                .map((item: ExtractedMenuItem): MenuItemResult => {
-                  const priceGuardResult = validateExtractedPrice(item.price, item.currency, sourceText);
-                  const hasPrice = priceGuardResult.status !== "unknown";
-                  return {
-                    category: item.category,
-                    name: item.name,
-                    description: item.description ?? undefined,
-                    price: hasPrice ? priceGuardResult.amount : undefined,
-                    currency: hasPrice ? (item.currency ?? undefined) : undefined,
-                    portion: item.portion ?? undefined,
-                    isLocalSpecialty: item.isLocalSpecialty,
-                    isVegetarian: item.isVegetarian,
-                    isVegan: item.isVegan,
-                    priceType: hasPrice
-                      ? (priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced")
-                      : undefined,
-                    source: hasPrice ? "web-research" : "unverified",
-                    confidence: hasPrice
-                      ? scoreConfidence({ textuallySupported: true, officialSource: official, extractionAmbiguous: priceGuardResult.status !== "valid", stale, multiSourceAgreement: null })
-                      : "unknown",
-                    checkedAt: new Date().toISOString(),
-                  };
-                });
+          if (!excludedAsClosed) {
+            const extracted = await extractMenuFromText(p.name, source.text);
+            menuItems = extracted
+              .filter((item: ExtractedMenuItem) => isMenuItemNameSupported(item.name, sourceText)) // never invented — must actually be on the page
+              .map((item: ExtractedMenuItem): MenuItemResult => {
+                const priceGuardResult = validateExtractedPrice(item.price, item.currency, sourceText);
+                const hasPrice = priceGuardResult.status !== "unknown";
+                return {
+                  category: item.category,
+                  name: item.name,
+                  description: item.description ?? undefined,
+                  price: hasPrice ? priceGuardResult.amount : undefined,
+                  currency: hasPrice ? (item.currency ?? undefined) : undefined,
+                  portion: item.portion ?? undefined,
+                  isLocalSpecialty: item.isLocalSpecialty,
+                  isVegetarian: item.isVegetarian,
+                  isVegan: item.isVegan,
+                  priceType: hasPrice
+                    ? (priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced")
+                    : undefined,
+                  source: hasPrice ? "web-research" : "unverified",
+                  confidence: hasPrice
+                    ? scoreConfidence({ textuallySupported: true, officialSource: official, extractionAmbiguous: priceGuardResult.status !== "valid", stale, multiSourceAgreement: null })
+                    : "unknown",
+                  checkedAt: new Date().toISOString(),
+                };
+              });
 
-              const trap = scoreTouristTrapRisk(sourceText, official);
-              touristTrapRisk = trap.risk;
-              touristTrapReasons = trap.reasons;
-              queueEstimate = estimateQueueSignal(sourceText);
-            }
+            const trap = scoreTouristTrapRisk(sourceText, official);
+            touristTrapRisk = trap.risk;
+            touristTrapReasons = trap.reasons;
+            queueEstimate = estimateQueueSignal(sourceText);
           }
         }
       } catch {
@@ -442,6 +470,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
       considered: [],
       consideredCount: pool.length,
       reason: "araştırılan hiçbir restoran adayı bu tarihte/öğün penceresinde uygun değildi",
+      officialSourceMetrics,
     };
   }
 
@@ -453,6 +482,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     selected,
     considered,
     consideredCount: pool.length,
+    officialSourceMetrics,
   };
 }
 

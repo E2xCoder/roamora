@@ -21,7 +21,8 @@ import {
   type RestaurantResearchResult,
   type LocalFoodResult,
 } from "@/server/services/restaurant";
-import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
+import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
+import { resolveResearchSource } from "@/server/services/direct-research";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
 import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS } from "@/server/services/otp-matrix";
@@ -112,6 +113,10 @@ export interface StopProvenance {
   priceConfidence: ConfidenceLevel;
   /** Set only when priceSource is "web-research" — a "minimum"/"reduced" price is real and textually-supported, but not what a typical traveller pays. */
   priceType?: "standard" | "minimum" | "reduced";
+  /** Which research tier actually supplied the web-research facts above — "official" means fetched directly from the place's own resolved domain, never via a generic search query. */
+  sourceType?: "official" | "secondary" | "unverified";
+  /** Set only when sourceType is "official" — the resolved official domain, e.g. "rijksmuseum.nl". */
+  officialDomain?: string;
   summarySource: "wikipedia" | "none";
   summaryText?: string;
   summaryUrl?: string;
@@ -175,6 +180,15 @@ export interface ResearchMetadata {
     capLimit: number;
     fallbackUsed: boolean;
   } | null; // null when profile !== "transit"
+  /** Second-stage "Direct Official Source Resolution" metrics (spec §Priority-4) — how often an official domain/page was found and used instead of a generic SearXNG query. */
+  officialSource: {
+    domainAttempted: number;
+    domainResolved: number;
+    pageAttempted: number;
+    pageResolved: number;
+    /** Generic SearXNG fallback queries that were never made because an official source answered the fact directly. */
+    searchQueriesAvoided: number;
+  };
 }
 
 export interface AutoplanResult {
@@ -347,6 +361,13 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   let webResearchSucceeded = 0;
   let webResearchSkippedDueToCap = 0;
   const MAX_WEB_RESEARCH_CALLS = 10; // cost/time control (spec §44/§54)
+  const officialSourceMetrics = {
+    domainAttempted: 0,
+    domainResolved: 0,
+    pageAttempted: 0,
+    pageResolved: 0,
+    searchQueriesAvoided: 0,
+  };
 
   for (const candidate of shortlist) {
     if (finalStops.length >= maxStops) break;
@@ -398,93 +419,115 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       webResearchSkippedDueToCap++;
     }
 
+    let sourceTypeUsed: StopProvenance["sourceType"] = "unverified";
+    let officialDomainUsed: string | undefined;
+
     if (wantsWebResearch && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
       webResearchAttempts++;
       try {
-        const results = await searxngProvider.searchWeb(
+        // Second-stage research: try the place's own official site directly
+        // (no search-engine round trip at all when it resolves) before
+        // falling back to the existing generic SearXNG query. Prefer the
+        // "hours" fact type when hours are still unknown — a museum's
+        // "plan your visit" page routinely carries both hours AND price, so
+        // one fetch commonly answers both facts extracted below, same as
+        // the previous single-search-result flow always assumed.
+        const { source, metrics } = await resolveResearchSource(
+          p.name,
+          req.destination,
+          p.tags,
+          needsHoursResearch ? "hours" : "price",
           `"${p.name}" ${req.destination} official opening hours price`,
-          5
+          searchAvailable
         );
-        // Prefer the result that looks like the place's own site, using
-        // engine agreement/score as tie-breakers among candidates — measured
-        // live against 15 real candidates, the literal top hit was wrong far
-        // more often than not (an unrelated company sharing an
-        // abbreviation, a Wikipedia disambiguation stub, a generic
-        // city-tourism blog), while a real official page was frequently
-        // sitting a few positions down, unused.
-        const page = selectBestResult(results, p.name);
-        if (page) {
-          const fetched = await fetchTextCapped(page.url);
-          if (fetched.ok) {
-            const sourceText = htmlToPlainText(fetched.text);
-            const facts = await extractFactsFromText(p.name, fetched.text);
-            if (facts) {
-              const official = isOfficialSource(page.url, page.title, p.name);
-              const stale = detectStaleness(sourceText);
-              const ambiguous = !facts.facts.hoursScope || facts.facts.hoursScope === "unclear";
+        officialSourceMetrics.domainAttempted += metrics.officialDomainAttempted ? 1 : 0;
+        officialSourceMetrics.domainResolved += metrics.officialDomainResolved ? 1 : 0;
+        officialSourceMetrics.pageAttempted += metrics.officialPageAttempted ? 1 : 0;
+        officialSourceMetrics.pageResolved += metrics.officialPageResolved ? 1 : 0;
+        officialSourceMetrics.searchQueriesAvoided += metrics.searchQueryAvoided ? 1 : 0;
 
-              if (!osmHours) {
-                const guardResult = validateExtractedOpeningHours(
-                  facts.facts.openingHoursText,
-                  facts.facts.hoursScope,
-                  sourceText
-                );
-                if (guardResult.status === "specific-hours") {
-                  const resolved = resolveOpeningHoursForDate(guardResult.osmSyntax, tripDate);
-                  if (resolved.status === "open" || resolved.status === "always") {
-                    const window = widestWindow(resolved);
-                    if (window) {
-                      // A non-official single source is weak evidence on its
-                      // own — cross-check against a second independent
-                      // result when one exists and the budget allows,
-                      // rather than reporting a confidence level no
-                      // corroboration was ever actually attempted for.
-                      let agreement: boolean | null = null;
-                      const secondSource = results.find((r) => r.url !== page.url);
-                      if (!official && secondSource && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
-                        webResearchAttempts++;
-                        agreement = await crossCheckAgreement(p.name, secondSource.url, guardResult.osmSyntax, trace);
-                      }
-                      earliestTime = window.open;
-                      latestTime = window.close;
-                      openingSource = "web-research";
-                      openingConfidence = scoreConfidence({
-                        textuallySupported: true,
-                        officialSource: official,
-                        extractionAmbiguous: ambiguous,
-                        stale,
-                        multiSourceAgreement: agreement,
-                      });
+        if (source) {
+          const sourceText = htmlToPlainText(source.text);
+          const facts = await extractFactsFromText(p.name, source.text);
+          if (facts) {
+            const official = source.official;
+            const stale = detectStaleness(sourceText);
+            const ambiguous = !facts.facts.hoursScope || facts.facts.hoursScope === "unclear";
+            sourceTypeUsed = source.sourceType === "official" ? "official" : "secondary";
+            if (source.sourceType === "official") {
+              officialDomainUsed = (() => {
+                try {
+                  return new URL(source.url).hostname.replace(/^www\./, "");
+                } catch {
+                  return undefined;
+                }
+              })();
+            }
+
+            if (!osmHours) {
+              const guardResult = validateExtractedOpeningHours(
+                facts.facts.openingHoursText,
+                facts.facts.hoursScope,
+                sourceText
+              );
+              if (guardResult.status === "specific-hours") {
+                const resolved = resolveOpeningHoursForDate(guardResult.osmSyntax, tripDate);
+                if (resolved.status === "open" || resolved.status === "always") {
+                  const window = widestWindow(resolved);
+                  if (window) {
+                    // A non-official single source is weak evidence on its
+                    // own — cross-check against a second independent
+                    // result when one exists and the budget allows,
+                    // rather than reporting a confidence level no
+                    // corroboration was ever actually attempted for. An
+                    // official-tier source has no "second search result" —
+                    // it is already the strongest evidence this pipeline
+                    // has, so no cross-check is needed or attempted.
+                    let agreement: boolean | null = null;
+                    const secondSource = source.searchResults.find((r) => r.url !== source.url);
+                    if (!official && secondSource && webResearchAttempts < MAX_WEB_RESEARCH_CALLS) {
+                      webResearchAttempts++;
+                      agreement = await crossCheckAgreement(p.name, secondSource.url, guardResult.osmSyntax, trace);
                     }
-                  } else if (resolved.status === "closed") {
-                    excludedAsClosed = true;
+                    earliestTime = window.open;
+                    latestTime = window.close;
+                    openingSource = "web-research";
+                    openingConfidence = scoreConfidence({
+                      textuallySupported: true,
+                      officialSource: official,
+                      extractionAmbiguous: ambiguous,
+                      stale,
+                      multiSourceAgreement: agreement,
+                    });
                   }
-                } else if (guardResult.status === "closed") {
+                } else if (resolved.status === "closed") {
                   excludedAsClosed = true;
                 }
-                // "by-appointment" / "today-only" (never a same-day-of-week
-                // constraint without known trip-date-vs-fetch-date context,
-                // which nothing here tracks) / "unknown" all leave the stop
-                // unconstrained, same as no web-research data at all.
+              } else if (guardResult.status === "closed") {
+                excludedAsClosed = true;
               }
-              const priceGuardResult = validateExtractedPrice(facts.facts.priceAmount, facts.facts.priceCurrency, sourceText);
-              if (priceGuardResult.status !== "unknown") {
-                // A minimum ("from €X") or reduced (child/student) fare is a
-                // real, textually-supported number, but not the price most
-                // travellers will actually pay — accepted (never invented),
-                // just never at the same confidence as a plain standard price.
-                const priceTypeAmbiguous = priceGuardResult.status !== "valid";
-                estimatedCost = priceGuardResult.amount;
-                priceType = priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced";
-                priceSource = "web-research";
-                priceConfidence = scoreConfidence({
-                  textuallySupported: true, // the guard already required this to reach a non-"unknown" status
-                  officialSource: official,
-                  extractionAmbiguous: priceTypeAmbiguous || facts.facts.priceCurrency == null,
-                  stale,
-                  multiSourceAgreement: null, // price cross-checking is not implemented — one extra fetch per fact would double the already-bounded research budget
-                });
-              }
+              // "by-appointment" / "today-only" (never a same-day-of-week
+              // constraint without known trip-date-vs-fetch-date context,
+              // which nothing here tracks) / "unknown" all leave the stop
+              // unconstrained, same as no web-research data at all.
+            }
+            const priceGuardResult = validateExtractedPrice(facts.facts.priceAmount, facts.facts.priceCurrency, sourceText);
+            if (priceGuardResult.status !== "unknown") {
+              // A minimum ("from €X") or reduced (child/student) fare is a
+              // real, textually-supported number, but not the price most
+              // travellers will actually pay — accepted (never invented),
+              // just never at the same confidence as a plain standard price.
+              const priceTypeAmbiguous = priceGuardResult.status !== "valid";
+              estimatedCost = priceGuardResult.amount;
+              priceType = priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced";
+              priceSource = "web-research";
+              priceConfidence = scoreConfidence({
+                textuallySupported: true, // the guard already required this to reach a non-"unknown" status
+                officialSource: official,
+                extractionAmbiguous: priceTypeAmbiguous || facts.facts.priceCurrency == null,
+                stale,
+                multiSourceAgreement: null, // price cross-checking is not implemented — one extra fetch per fact would double the already-bounded research budget
+              });
             }
           }
         }
@@ -540,6 +583,8 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       priceSource,
       priceConfidence,
       priceType,
+      sourceType: sourceTypeUsed,
+      officialDomain: officialDomainUsed,
       summarySource,
       summaryText,
       summaryUrl,
@@ -784,6 +829,12 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     researchLocalFood(req.destination, searchAvailable, aiAvailable),
   ]);
 
+  officialSourceMetrics.domainAttempted += restaurant.officialSourceMetrics.domainAttempted;
+  officialSourceMetrics.domainResolved += restaurant.officialSourceMetrics.domainResolved;
+  officialSourceMetrics.pageAttempted += restaurant.officialSourceMetrics.pageAttempted;
+  officialSourceMetrics.pageResolved += restaurant.officialSourceMetrics.pageResolved;
+  officialSourceMetrics.searchQueriesAvoided += restaurant.officialSourceMetrics.searchQueriesAvoided;
+
   if (restaurant.status === "scheduled" && restaurant.selected) {
     const sel = restaurant.selected;
     finalStops.push({
@@ -985,6 +1036,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
       capLimit: MAX_WEB_RESEARCH_CALLS,
     },
     transitRouting: transitMetadata,
+    officialSource: officialSourceMetrics,
   };
 
   const departureSafety: DepartureSafetyResult = {
