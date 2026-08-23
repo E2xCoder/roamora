@@ -44,6 +44,7 @@ describe("restaurantStopInput", () => {
       openingHoursConfidence: "high",
       mealWindow: "lunch",
       menuItems: [],
+      menuAvailability: { status: "no-source" },
       touristTrapRisk: "LOW",
       touristTrapReasons: [],
       queueEstimate: null,

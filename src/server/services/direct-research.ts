@@ -2,7 +2,7 @@ import "server-only";
 import { searxngProvider, SearchUnavailableError } from "@/server/providers/research/searxng";
 import type { WebSearchResult } from "@/server/providers/research/types";
 import { selectBestResult, isOfficialSource } from "@/server/services/confidence";
-import { fetchTextCapped } from "@/server/services/url-safety";
+import { fetchTextOrPdfCapped } from "@/server/services/url-safety";
 import { resolveOfficialSource } from "@/server/services/official-source";
 import { fetchFactPage, type FactPageType } from "@/server/services/official-site-crawler";
 
@@ -25,13 +25,15 @@ import { fetchFactPage, type FactPageType } from "@/server/services/official-sit
  */
 
 export interface ResolvedSource {
-  /** Raw fetched text (HTML) — same shape every existing extractor already expects. */
+  /** Real extractable text — raw HTML (existing extractors run htmlToPlainText themselves), or already-extracted PDF text when wasPdf is true. */
   text: string;
   url: string;
   /** Official-tier sources have no search-result "title"; the place name stands in, since callers only use this for isOfficialSource-style title checks. */
   title: string;
   official: boolean;
   sourceType: "official" | "secondary";
+  /** True when `text` came from real PDF extraction (pdf-extraction.ts) rather than HTML — callers should not run htmlToPlainText on it again. */
+  wasPdf: boolean;
   /** Other results from the same SearXNG query, when the secondary tier ran — for cross-checking. Empty when the official tier supplied the source. */
   searchResults: WebSearchResult[];
 }
@@ -82,6 +84,7 @@ export async function resolveResearchSource(
           title: placeName,
           official: true,
           sourceType: "official",
+          wasPdf: factPage.wasPdf,
           searchResults: [],
         },
         metrics,
@@ -95,7 +98,7 @@ export async function resolveResearchSource(
     const results = await searxngProvider.searchWeb(fallbackQuery, 5);
     const page = selectBestResult(results, placeName);
     if (!page) return { source: null, metrics };
-    const fetched = await fetchTextCapped(page.url);
+    const fetched = await fetchTextOrPdfCapped(page.url);
     if (!fetched.ok) return { source: null, metrics };
     return {
       source: {
@@ -104,6 +107,7 @@ export async function resolveResearchSource(
         title: page.title,
         official: isOfficialSource(page.url, page.title, placeName),
         sourceType: "secondary",
+        wasPdf: fetched.wasPdf,
         searchResults: results,
       },
       metrics,

@@ -1,6 +1,7 @@
 import "server-only";
-import { fetchTextCapped } from "@/server/services/url-safety";
+import { fetchTextCapped, fetchTextOrPdfCapped } from "@/server/services/url-safety";
 import { getCached } from "@/server/services/research-cache";
+import { htmlToPlainText } from "@/server/services/fact-extraction";
 
 /**
  * Bounded, safe official-site crawler (spec §Priority-4, "Official Site
@@ -104,6 +105,48 @@ export function scoreLinkForFactType(url: string, factType: FactPageType): numbe
   return keywords.reduce((score, kw) => (path.includes(kw) ? score + 1 : score), 0);
 }
 
+// A real, content-bearing fact page has meaningfully more extractable text
+// than a boilerplate nav/footer shell. Checked against REAL plain text, not
+// raw HTML byte length — the bug this replaces (`fetched.text.trim().length
+// > 200`, checking raw markup) always passed for a JS-rendered page, since
+// its raw HTML is typically large even when almost none of it is real
+// content (live-confirmed: fulumandarijn.com/menu — 199KB of HTML, 764
+// characters of real text after stripping tags). A large HTML payload
+// carrying very little real text is exactly what a client-side-rendered
+// page looks like before its JavaScript has run — this pipeline only ever
+// sees the initial server response, so such a page's real menu is not
+// retrievable this way at all; reporting that honestly (see restaurant.ts)
+// is the correct behavior, not pretending extraction ran on real content.
+const MIN_REAL_TEXT_CHARS = 250;
+const SHELL_SUSPECT_HTML_BYTES = 5000;
+const SHELL_SUSPECT_MAX_REAL_TEXT_CHARS = 800;
+
+export interface PageContentCheck {
+  /** True when this page is unlikely to contain retrievable static content — either too little text outright, or a large HTML payload carrying almost none (a JS-rendered shell's real-world shape). */
+  looksEmpty: boolean;
+  realTextChars: number;
+}
+
+/**
+ * `plainText` should already be real extractable text — `htmlToPlainText(html)`
+ * for an HTML page, or the PDF's own extracted text as-is (never re-run
+ * through htmlToPlainText, which is an HTML-specific transform). `rawLength`
+ * is the original fetched payload's length (HTML bytes, or PDF byte count) —
+ * only used for the shell-suspect ratio check, since a real PDF's byte
+ * count reflects embedded fonts/images, not "boilerplate", so this check is
+ * naturally forgiving for PDFs (a genuine PDF menu with real text rarely
+ * trips it — confirmed live against Berlin's Jolly-Speisekarte.pdf: 767KB
+ * raw, 11,918 real characters, comfortably over SHELL_SUSPECT_MAX_REAL_TEXT_CHARS).
+ */
+export function checkPageContent(rawLength: number, plainText: string): PageContentCheck {
+  const realTextChars = plainText.length;
+  if (realTextChars < MIN_REAL_TEXT_CHARS) return { looksEmpty: true, realTextChars };
+  if (rawLength > SHELL_SUSPECT_HTML_BYTES && realTextChars < SHELL_SUSPECT_MAX_REAL_TEXT_CHARS) {
+    return { looksEmpty: true, realTextChars };
+  }
+  return { looksEmpty: false, realTextChars };
+}
+
 /** Parses the `User-agent: *` block's `Disallow` rules from a robots.txt body — a minimal, real safety check, not a full robots.txt implementation. */
 export function parseRobotsDisallow(robotsTxt: string): string[] {
   const lines = robotsTxt.split(/\r?\n/).map((l) => l.trim());
@@ -194,8 +237,23 @@ export async function resolveFactPageUrl(officialUrl: string, factType: FactPage
 
     for (const { link } of candidates) {
       try {
-        const fetched = await fetchTextCapped(link);
-        if (fetched.ok && fetched.text.trim().length > 200) return link; // stop once a real page is found
+        // fetchTextOrPdfCapped, not fetchTextCapped: a "menu" keyword match
+        // is very often literally a PDF link (real case: this exact
+        // FACT_PATH_KEYWORDS.menu vocabulary includes "speisekarte", which
+        // is how Berlin's Jolly-Speisekarte.pdf gets found at all) — real
+        // extracted PDF text, not raw-decoded binary, is what checkPageContent
+        // and the caller's extractor need to see.
+        const fetched = await fetchTextOrPdfCapped(link);
+        if (!fetched.ok) continue;
+        // PDFs are already real extracted text (not markup), so the
+        // HTML-shell ratio check doesn't apply to them — passing rawLength
+        // 0 skips it, leaving only the MIN_REAL_TEXT_CHARS floor.
+        const plainText = fetched.wasPdf ? fetched.text : htmlToPlainText(fetched.text);
+        const rawLength = fetched.wasPdf ? 0 : fetched.text.length;
+        if (!checkPageContent(rawLength, plainText).looksEmpty) {
+          return link; // stop once a real, content-bearing page is found
+        }
+        // Otherwise: too little real text (or a JS-rendered shell) — try the next real candidate rather than accepting it.
       } catch {
         continue;
       }
@@ -210,14 +268,16 @@ export async function resolveFactPageUrl(officialUrl: string, factType: FactPage
 
 export interface FetchedFactPage {
   url: string;
+  /** Real extractable text — already-extracted PDF text when wasPdf is true, raw HTML otherwise (existing extractors already run htmlToPlainText on it themselves). */
   text: string;
+  wasPdf: boolean;
 }
 
 /** Resolves (cached) then fetches (always live — a fact page's content changes far more often than its URL). */
 export async function fetchFactPage(officialUrl: string, factType: FactPageType): Promise<FetchedFactPage | null> {
   const pageUrl = await resolveFactPageUrl(officialUrl, factType);
   if (!pageUrl) return null;
-  const fetched = await fetchTextCapped(pageUrl);
+  const fetched = await fetchTextOrPdfCapped(pageUrl);
   if (!fetched.ok) return null;
-  return { url: pageUrl, text: fetched.text };
+  return { url: pageUrl, text: fetched.text, wasPdf: fetched.wasPdf };
 }

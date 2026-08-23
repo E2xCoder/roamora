@@ -152,9 +152,41 @@ export function detectStaleness(sourceText: string, now: Date = new Date()): boo
  * tie-breakers: official-ness first, then agreement across engines (a real
  * corroboration signal), then SearXNG's own score.
  */
+/**
+ * A real, minimal relevance floor — does the result's title or URL share
+ * ANY meaningful (3+ char) token with the place name at all? Live-caught
+ * regression: `selectBestResult` used to always return `ranked[0]` even
+ * when NONE of a SearXNG query's results had anything to do with the place
+ * — `isOfficialSource` only affects sort order between candidates, it was
+ * never a hard filter, so "best of five completely irrelevant results" was
+ * still returned as if it were a real match. Real case: searching
+ * `"Oseyo25" Poznań restaurant menu prices` returned, among its top
+ * results, a Microsoft Windows audio-troubleshooting support page — which
+ * got selected and fed straight into menu extraction as this restaurant's
+ * "official" source. Short/generic names (≤2 significant tokens after
+ * filtering) skip this check entirely rather than risk false negatives on
+ * legitimately short place names.
+ */
+export function hasNameRelevance(result: WebSearchResult, placeName: string): boolean {
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const nameTokens = normalize(placeName)
+    .split(" ")
+    .filter((t) => t.length >= 3);
+  if (nameTokens.length === 0) return true; // nothing meaningful to check a short/generic name against
+  const haystack = normalize(`${result.title} ${result.url}`);
+  return nameTokens.some((t) => haystack.includes(t));
+}
+
 export function selectBestResult(results: WebSearchResult[], placeName: string): WebSearchResult | undefined {
-  if (results.length === 0) return undefined;
-  const ranked = [...results].sort((a, b) => {
+  const relevant = results.filter((r) => hasNameRelevance(r, placeName));
+  if (relevant.length === 0) return undefined; // no result had any real connection to the place — no source is more honest than a wrong one
+  const ranked = [...relevant].sort((a, b) => {
     const officialA = isOfficialSource(a.url, a.title, placeName) ? 1 : 0;
     const officialB = isOfficialSource(b.url, b.title, placeName) ? 1 : 0;
     if (officialA !== officialB) return officialB - officialA;

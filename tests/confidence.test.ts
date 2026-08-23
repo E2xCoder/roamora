@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult } from "@/server/services/confidence";
+import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult, hasNameRelevance } from "@/server/services/confidence";
 import type { WebSearchResult } from "@/server/providers/research/types";
 
 describe("scoreConfidence", () => {
@@ -201,17 +201,37 @@ describe("selectBestResult", () => {
   );
 
   it(
-    "known, documented limitation: cannot match a place name against a foreign-language " +
-      'domain with no shared words (real case: "St. Vitus Cathedral" vs the real official ' +
-      'site katedralasvatehovita.cz, Czech for "cathedral of St. Vitus") — correctly falls ' +
-      "back to the first result rather than guessing, since neither looks official by this " +
-      "heuristic",
+    "production-hardening fix (spec §3, was a documented limitation before this pass): " +
+      'when NEITHER result shares any real word with the place name (real case: "St. Vitus ' +
+      'Cathedral" vs the real official site katedralasvatehovita.cz, Czech for "cathedral of ' +
+      'St. Vitus" — no shared token even after normalization) this used to silently fall back ' +
+      "to the first result regardless of relevance — real, live-caught case: a restaurant " +
+      "search returning an unrelated Microsoft support page as the \"selected\" source (see " +
+      "the hasNameRelevance test below). Now returns undefined — no source is more honest " +
+      "than a confidently wrong one.",
     () => {
       const results = [
         result({ title: "STMicroelectronics: Our technology starts with you", url: "https://www.st.com/content/st_com/en.html" }),
         result({ title: "For visitors - Katedrála svatého Víta", url: "https://www.katedralasvatehovita.cz/en/for-visitors/" }),
       ];
-      expect(selectBestResult(results, "St. Vitus Cathedral")?.url).toBe("https://www.st.com/content/st_com/en.html");
+      expect(selectBestResult(results, "St. Vitus Cathedral")).toBeUndefined();
+    }
+  );
+
+  it(
+    "real regression case: a restaurant search whose top results include a completely " +
+      'unrelated page (live-observed: searching "Oseyo25" Poznań restaurant menu prices ' +
+      "surfaced a Microsoft Windows audio-troubleshooting support page as the SearXNG " +
+      'result later fed to menu extraction as this restaurant\'s "source") — filtered out ' +
+      "entirely rather than selected, since it shares no real word with the place name",
+    () => {
+      const results = [
+        result({
+          title: "Fix sound or audio problems in Windows",
+          url: "https://support.microsoft.com/en-US/Windows/Hardware/Audio/fix-sound-or-audio-problems-in-windows",
+        }),
+      ];
+      expect(selectBestResult(results, "Oseyo25")).toBeUndefined();
     }
   );
 
@@ -220,7 +240,7 @@ describe("selectBestResult", () => {
       result({ title: "Weak match", url: "https://blog.example/a", engineAgreement: 1 }),
       result({ title: "Strong cross-engine agreement", url: "https://blog.example/b", engineAgreement: 3 }),
     ];
-    expect(selectBestResult(results, "Some Place")?.url).toBe("https://blog.example/b");
+    expect(selectBestResult(results, "Blog Example")?.url).toBe("https://blog.example/b");
   });
 
   it("falls back to SearXNG's own score as a tie-breaker when agreement is equal", () => {
@@ -228,15 +248,34 @@ describe("selectBestResult", () => {
       result({ title: "Lower score", url: "https://blog.example/a", engineAgreement: 1, score: 2 }),
       result({ title: "Higher score", url: "https://blog.example/b", engineAgreement: 1, score: 9 }),
     ];
-    expect(selectBestResult(results, "Some Place")?.url).toBe("https://blog.example/b");
+    expect(selectBestResult(results, "Blog Example")?.url).toBe("https://blog.example/b");
   });
 
   it("preserves original order among true ties (stable sort, no arbitrary reshuffling)", () => {
     const results = [result({ url: "https://a.example/" }), result({ url: "https://b.example/" })];
-    expect(selectBestResult(results, "Some Place")?.url).toBe("https://a.example/");
+    expect(selectBestResult(results, "Example")?.url).toBe("https://a.example/");
   });
 
   it("returns undefined for an empty result list", () => {
     expect(selectBestResult([], "Some Place")).toBeUndefined();
+  });
+});
+
+describe("hasNameRelevance", () => {
+  it("passes when the result shares a real word with the place name", () => {
+    expect(hasNameRelevance(result({ title: "Jolly Restaurant Berlin", url: "https://restaurant-jolly.de/" }), "Jolly")).toBe(true);
+  });
+
+  it("fails when nothing in the title or URL relates to the place name at all", () => {
+    expect(
+      hasNameRelevance(
+        result({ title: "Fix sound or audio problems in Windows", url: "https://support.microsoft.com/windows/audio" }),
+        "Oseyo25"
+      )
+    ).toBe(false);
+  });
+
+  it("skips the check (returns true) for a name with no token 3+ characters long", () => {
+    expect(hasNameRelevance(result({ title: "Anything at all" }), "A B")).toBe(true);
   });
 });

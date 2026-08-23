@@ -6,11 +6,12 @@ import { searxngProvider, SearchUnavailableError } from "@/server/providers/rese
 import { extractFactsFromText, htmlToPlainText, ExtractionUnavailableError } from "@/server/services/fact-extraction";
 import { validateExtractedOpeningHours } from "@/server/services/opening-hours-guard";
 import { validateExtractedPrice } from "@/server/services/price-guard";
-import { extractMenuFromText, extractLocalFoodFromText, type ExtractedMenuItem } from "@/server/services/restaurant-extraction";
+import { extractMenuFromText, extractLocalFoodFromText, extractJsonLdMenuItems, type ExtractedMenuItem } from "@/server/services/restaurant-extraction";
 import { isMenuItemNameSupported, isLikelyNavigationLabel, estimateQueueSignal, scoreTouristTrapRisk, type QueueEstimate, type TouristTrapRisk } from "@/server/services/restaurant-guard";
 import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { resolveResearchSource } from "@/server/services/direct-research";
+import { checkPageContent } from "@/server/services/official-site-crawler";
 import { fetchWikivoyageEatSection, cityNameForWikivoyageSearch } from "@/server/services/wikivoyage-research";
 
 /**
@@ -72,6 +73,19 @@ export interface MenuItemResult {
   checkedAt?: string;
 }
 
+/**
+ * Honest, per-restaurant menu reporting (production-hardening spec §3):
+ * "no-source" — research never ran or found nothing to fetch at all.
+ * "unavailable" — a real page was fetched but genuinely had no retrievable
+ * menu (JS-rendered shell, unparsable PDF, or real content with nothing a
+ * guard would trust) — `reason` says which. "extracted" — menuItems has at
+ * least one guard-verified item.
+ */
+export interface MenuAvailability {
+  status: "extracted" | "no-source" | "unavailable";
+  reason?: string;
+}
+
 export interface RestaurantCandidateResult {
   stopId: string;
   name: string;
@@ -82,6 +96,7 @@ export interface RestaurantCandidateResult {
   openingHoursConfidence: ConfidenceLevel;
   mealWindow: MealWindow["name"];
   menuItems: MenuItemResult[];
+  menuAvailability: MenuAvailability;
   estimatedMealCost?: number;
   currency?: string;
   touristTrapRisk: TouristTrapRisk | "UNKNOWN";
@@ -353,6 +368,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     if (!usableWindow) continue; // known hours never overlap any reachable meal window
 
     let menuItems: MenuItemResult[] = [];
+    let menuAvailability: MenuAvailability = { status: "no-source" };
     let sourceUrl = "osm";
     let touristTrapRisk: RestaurantCandidateResult["touristTrapRisk"] = "UNKNOWN";
     let touristTrapReasons: string[] = [];
@@ -361,6 +377,9 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     let fallbackCurrency: string | undefined;
 
     const wantsResearch = params.searchAvailable && params.aiAvailable && researchCalls < MAX_RESTAURANT_RESEARCH_CALLS;
+    menuAvailability = wantsResearch
+      ? { status: "no-source", reason: "araştırma yapıldı ama hiçbir kaynak bulunamadı" }
+      : { status: "no-source", reason: params.searchAvailable ? "araştırma çağrı sınırına ulaşıldı" : "arama/AI kullanılamıyor" };
     if (wantsResearch) {
       researchCalls++;
       try {
@@ -385,7 +404,10 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
 
         if (source) {
           sourceUrl = source.url;
-          const sourceText = htmlToPlainText(source.text);
+          // PDF text is already real extracted text (pdf-extraction.ts), not
+          // markup — running the HTML-tag-stripping transform on it again
+          // would be a needless (if mostly harmless) no-op at best.
+          const sourceText = source.wasPdf ? source.text : htmlToPlainText(source.text);
           const official = source.official;
           const stale = detectStaleness(sourceText);
 
@@ -425,38 +447,78 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
             }
 
           if (!excludedAsClosed) {
-            const extracted = await extractMenuFromText(p.name, source.text);
-            menuItems = extracted
-              .filter((item: ExtractedMenuItem) => isMenuItemNameSupported(item.name, sourceText)) // never invented — must actually be on the page
-              .filter((item: ExtractedMenuItem) => !isLikelyNavigationLabel(item.name)) // not a nav/category link mistaken for a dish (real case: fulumandarijn.com/menu's "Food Menu"/"Drink Menu"/"Member Menu"/"Home Menu")
-              .map((item: ExtractedMenuItem): MenuItemResult => {
-                const priceGuardResult = validateExtractedPrice(item.price, item.currency, sourceText);
-                const hasPrice = priceGuardResult.status !== "unknown";
-                return {
-                  category: item.category,
-                  name: item.name,
-                  description: item.description ?? undefined,
-                  price: hasPrice ? priceGuardResult.amount : undefined,
-                  currency: hasPrice ? (item.currency ?? undefined) : undefined,
-                  portion: item.portion ?? undefined,
-                  isLocalSpecialty: item.isLocalSpecialty,
-                  isVegetarian: item.isVegetarian,
-                  isVegan: item.isVegan,
-                  priceType: hasPrice
-                    ? (priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced")
-                    : undefined,
-                  source: hasPrice ? "web-research" : "unverified",
-                  confidence: hasPrice
-                    ? scoreConfidence({ textuallySupported: true, officialSource: official, extractionAmbiguous: priceGuardResult.status !== "valid", stale, multiSourceAgreement: null })
-                    : "unknown",
-                  checkedAt: new Date().toISOString(),
-                };
-              });
+            // Real content check before attempting extraction at all — the
+            // fix for a page that fetches fine (HTTP 200) but is a
+            // JS-rendered shell with almost no static content (live-
+            // confirmed: fulumandarijn.com/menu, 199KB HTML / 764 real
+            // characters). The old check here operated on raw HTML byte
+            // length, which is large for exactly this kind of page — this
+            // one checks real extractable text instead, and reports the gap
+            // honestly rather than running an extractor against near-empty
+            // input and silently returning zero items with no explanation.
+            const rawLength = source.wasPdf ? 0 : source.text.length;
+            const contentCheck = checkPageContent(rawLength, sourceText);
 
-            const trap = scoreTouristTrapRisk(sourceText, official);
-            touristTrapRisk = trap.risk;
-            touristTrapReasons = trap.reasons;
-            queueEstimate = estimateQueueSignal(sourceText);
+            if (contentCheck.looksEmpty) {
+              menuAvailability = {
+                status: "unavailable",
+                reason: source.wasPdf
+                  ? "PDF'den gerçek metin çıkarılamadı"
+                  : `sayfa büyük ölçüde JS ile oluşturulmuş görünüyor (yalnızca ${contentCheck.realTextChars} karakter gerçek metin bulundu) — statik olarak menü içeriği alınamadı`,
+              };
+            } else {
+              // Real schema.org Menu structured data first — zero LLM risk,
+              // the site's own markup, tried before any model call (spec §3:
+              // "inspect JSON-LD"). Only meaningful for real HTML, not
+              // already-extracted PDF text.
+              const jsonLdItems = source.wasPdf ? [] : extractJsonLdMenuItems(source.text);
+              const usedJsonLd = jsonLdItems.length > 0;
+              const extracted = usedJsonLd ? jsonLdItems : await extractMenuFromText(p.name, source.text);
+
+              menuItems = extracted
+                .filter((item: ExtractedMenuItem) => isMenuItemNameSupported(item.name, sourceText)) // never invented — must actually be on the page
+                .filter((item: ExtractedMenuItem) => !isLikelyNavigationLabel(item.name)) // not a nav/category link mistaken for a dish (real case: fulumandarijn.com/menu's "Food Menu"/"Drink Menu"/"Member Menu"/"Home Menu")
+                .map((item: ExtractedMenuItem): MenuItemResult => {
+                  // JSON-LD prices live inside <script> tags, which
+                  // htmlToPlainText strips — validateExtractedPrice's
+                  // visible-text-presence check would reject every genuine
+                  // structured price for that reason alone, not because it's
+                  // wrong. The site's own structured markup is trusted
+                  // directly instead, same as how search engines consume it.
+                  const priceGuardResult = usedJsonLd
+                    ? (item.price != null ? { status: "valid" as const, amount: item.price } : { status: "unknown" as const })
+                    : validateExtractedPrice(item.price, item.currency, sourceText);
+                  const hasPrice = priceGuardResult.status !== "unknown";
+                  return {
+                    category: item.category,
+                    name: item.name,
+                    description: item.description ?? undefined,
+                    price: hasPrice ? priceGuardResult.amount : undefined,
+                    currency: hasPrice ? (item.currency ?? undefined) : undefined,
+                    portion: item.portion ?? undefined,
+                    isLocalSpecialty: item.isLocalSpecialty,
+                    isVegetarian: item.isVegetarian,
+                    isVegan: item.isVegan,
+                    priceType: hasPrice
+                      ? (priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced")
+                      : undefined,
+                    source: hasPrice ? "web-research" : "unverified",
+                    confidence: hasPrice
+                      ? scoreConfidence({ textuallySupported: !usedJsonLd, officialSource: official || usedJsonLd, extractionAmbiguous: !usedJsonLd && priceGuardResult.status !== "valid", stale, multiSourceAgreement: null })
+                      : "unknown",
+                    checkedAt: new Date().toISOString(),
+                  };
+                });
+
+              menuAvailability = menuItems.length > 0
+                ? { status: "extracted" }
+                : { status: "unavailable", reason: "sayfada gerçek içerik var ama güvenilir bir menü öğesi bulunamadı" };
+
+              const trap = scoreTouristTrapRisk(sourceText, official);
+              touristTrapRisk = trap.risk;
+              touristTrapReasons = trap.reasons;
+              queueEstimate = estimateQueueSignal(sourceText);
+            }
           }
         }
       } catch {
@@ -464,6 +526,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
         // stays at OSM-only/unverified level, exactly like the main loop's
         // per-stop try/catch; one candidate's research failure must not
         // abort researching the rest of the pool.
+        menuAvailability = { status: "unavailable", reason: "araştırma sırasında bir hata oluştu" };
       }
     }
     if (excludedAsClosed) continue;
@@ -507,6 +570,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
       openingHoursConfidence: openingConfidence,
       mealWindow: usableWindow.name,
       menuItems,
+      menuAvailability,
       estimatedMealCost,
       currency,
       touristTrapRisk,

@@ -4,6 +4,7 @@ import {
   scoreLinkForFactType,
   parseRobotsDisallow,
   isPathAllowed,
+  checkPageContent,
 } from "@/server/services/official-site-crawler";
 
 describe("extractSameDomainLinks", () => {
@@ -128,4 +129,35 @@ describe("isPathAllowed", () => {
   it("allows everything when there are no rules at all", () => {
     expect(isPathAllowed("/anything", [])).toBe(true);
   });
+});
+
+describe("checkPageContent", () => {
+  it(
+    "flags a real, live-observed JS-rendered shell (fulumandarijn.com/menu: ~199KB of HTML, " +
+      "764 real characters after stripping tags)",
+    () => {
+      const html = "<div>" + "x".repeat(199_000) + "</div>";
+      const plainText = "a".repeat(764); // simulates htmlToPlainText's real output size for that page
+      expect(checkPageContent(html.length, plainText).looksEmpty).toBe(true);
+    }
+  );
+
+  it("does not flag a real, content-bearing menu page of ordinary size", () => {
+    const html = "<html>" + "<p>Pierogi 25 PLN</p>".repeat(100) + "</html>";
+    const plainText = "Pierogi 25 PLN ".repeat(100).trim();
+    expect(checkPageContent(html.length, plainText).looksEmpty).toBe(false);
+  });
+
+  it("flags a page with too little real text even when the HTML itself is small (not just the JS-shell ratio case)", () => {
+    expect(checkPageContent(300, "Page not found").looksEmpty).toBe(true);
+  });
+
+  it(
+    "does not flag a real, large PDF-extracted menu (live-confirmed: Berlin's Jolly-" +
+      "Speisekarte.pdf — 767KB raw, 11,918 real characters — rawLength 0 is passed for PDFs " +
+      "since the HTML-shell ratio check does not apply to already-extracted text)",
+    () => {
+      expect(checkPageContent(0, "x".repeat(11_918)).looksEmpty).toBe(false);
+    }
+  );
 });

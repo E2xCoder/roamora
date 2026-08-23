@@ -32,6 +32,120 @@ const menuSchema = z.object({
 
 export type ExtractedMenuItem = z.infer<typeof menuItemSchema>;
 
+const MAX_JSON_LD_DEPTH = 6;
+const MAX_JSON_LD_ITEMS = 40;
+
+interface JsonLdNode {
+  "@type"?: unknown;
+  [key: string]: unknown;
+}
+
+function jsonLdTypes(node: JsonLdNode): string[] {
+  const t = node["@type"];
+  if (typeof t === "string") return [t];
+  if (Array.isArray(t)) return t.filter((x): x is string => typeof x === "string");
+  return [];
+}
+
+function asNodeArray(value: unknown): JsonLdNode[] {
+  if (Array.isArray(value)) return value.filter((v): v is JsonLdNode => typeof v === "object" && v !== null);
+  if (value && typeof value === "object") return [value as JsonLdNode];
+  return [];
+}
+
+function offerPrice(node: JsonLdNode): { price: number | null; currency: string | null } {
+  const offersRaw = node.offers;
+  const offer = asNodeArray(offersRaw)[0];
+  const rawPrice = offer?.price ?? node.price;
+  const price = typeof rawPrice === "number" ? rawPrice : typeof rawPrice === "string" && !Number.isNaN(Number(rawPrice)) ? Number(rawPrice) : null;
+  const rawCurrency = offer?.priceCurrency ?? node.priceCurrency;
+  const currency = typeof rawCurrency === "string" ? rawCurrency : null;
+  return { price, currency };
+}
+
+/**
+ * Real schema.org Menu/MenuSection/MenuItem structured data
+ * (https://schema.org/Menu) — a standard many restaurant site builders
+ * (WordPress restaurant themes, Squarespace, Wix) emit even when the
+ * *visible* page is otherwise client-side rendered, since search engines
+ * read it directly. When present, it is a zero-LLM-risk, deterministic
+ * source: no model call, no hallucination possibility, the site's own
+ * markup asserting its own menu. Walks Restaurant.hasMenu ->
+ * Menu.hasMenuSection/hasMenuItem -> MenuSection.hasMenuItem (nested
+ * sections) -> MenuItem.offers.price, depth-bounded against pathological
+ * nesting in untrusted third-party markup.
+ */
+function collectMenuItems(node: JsonLdNode, category: string, depth: number, out: ExtractedMenuItem[]): void {
+  if (depth > MAX_JSON_LD_DEPTH || out.length >= MAX_JSON_LD_ITEMS) return;
+  const types = jsonLdTypes(node);
+
+  if (types.includes("Restaurant") || types.includes("FoodEstablishment")) {
+    for (const menu of asNodeArray(node.hasMenu)) collectMenuItems(menu, category, depth + 1, out);
+    return;
+  }
+  if (types.includes("Menu")) {
+    const menuName = typeof node.name === "string" ? node.name : category;
+    for (const section of asNodeArray(node.hasMenuSection)) collectMenuItems(section, menuName, depth + 1, out);
+    for (const item of asNodeArray(node.hasMenuItem)) collectMenuItems(item, menuName, depth + 1, out);
+    return;
+  }
+  if (types.includes("MenuSection")) {
+    const sectionName = typeof node.name === "string" ? node.name : category;
+    for (const section of asNodeArray(node.hasMenuSection)) collectMenuItems(section, sectionName, depth + 1, out);
+    for (const item of asNodeArray(node.hasMenuItem)) collectMenuItems(item, sectionName, depth + 1, out);
+    return;
+  }
+  if (types.includes("MenuItem")) {
+    const name = typeof node.name === "string" ? node.name.trim() : "";
+    if (!name) return;
+    const { price, currency } = offerPrice(node);
+    const parsed = menuItemSchema.safeParse({
+      category,
+      name,
+      description: typeof node.description === "string" ? node.description : null,
+      price,
+      currency,
+      portion: null,
+      isLocalSpecialty: false,
+      isVegetarian: false,
+      isVegan: false,
+    });
+    if (parsed.success) out.push(parsed.data);
+  }
+}
+
+/**
+ * Scans raw HTML for `<script type="application/ld+json">` blocks and
+ * extracts any real schema.org Menu data found — see collectMenuItems.
+ * Tried before the Ollama-based extractMenuFromText below (see restaurant.ts):
+ * when it finds real items, no LLM call is needed at all for this
+ * restaurant. Returns an empty array (never throws) when a script block is
+ * malformed JSON or carries no Menu-shaped data — a page with no JSON-LD is
+ * simply not a JSON-LD source, not an error.
+ */
+export function extractJsonLdMenuItems(html: string): ExtractedMenuItem[] {
+  const items: ExtractedMenuItem[] = [];
+  const scriptRe = /<script[^>]+type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = scriptRe.exec(html)) !== null) {
+    if (items.length >= MAX_JSON_LD_ITEMS) break;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(match[1]);
+    } catch {
+      continue;
+    }
+    // A single top-level object always has asNodeArray(parsed).length === 1
+    // (it wraps a lone object into a 1-element array), so "@graph" presence
+    // must be checked explicitly first — checking array-length alone never
+    // reached the @graph branch for the common `{ "@graph": [...] }` shape.
+    const graph = !Array.isArray(parsed) && parsed && typeof parsed === "object" ? (parsed as JsonLdNode)["@graph"] : undefined;
+    const topNodes = graph !== undefined ? asNodeArray(graph) : asNodeArray(parsed);
+    for (const node of topNodes) collectMenuItems(node, "Menu", 0, items);
+  }
+  return items;
+}
+
 /**
  * Extracts individual menu items (category, name, price, portion,
  * description, dietary flags) from a restaurant's real page text. Returns an

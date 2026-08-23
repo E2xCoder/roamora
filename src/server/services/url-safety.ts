@@ -116,14 +116,16 @@ export const FETCH_LIMITS = {
   maxBytes: 2 * 1024 * 1024, // 2 MB of HTML is far more than any page needs
 };
 
-/**
- * Fetches text with a size cap, so a hostile or broken origin cannot exhaust
- * memory by streaming indefinitely.
- */
-export async function fetchTextCapped(
+interface FetchedBytes {
+  bytes: Uint8Array;
+  contentType: string | null;
+}
+
+/** Shared capped-download core — both fetchTextCapped and fetchTextOrPdfCapped build on this so the size-cap streaming logic exists exactly once. */
+async function fetchBytesCapped(
   url: string,
   init?: RequestInit
-): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true } & FetchedBytes | { ok: false; reason: string }> {
   try {
     const res = await fetch(url, {
       ...init,
@@ -132,7 +134,7 @@ export async function fetchTextCapped(
       headers: {
         "User-Agent":
           "Mozilla/5.0 (compatible; Roamora/1.0; +https://github.com/E2xCoder/roamora)",
-        Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        Accept: "text/html,application/xhtml+xml,application/pdf,application/json;q=0.9,*/*;q=0.8",
         ...init?.headers,
       },
     });
@@ -143,9 +145,10 @@ export async function fetchTextCapped(
     if (declared > FETCH_LIMITS.maxBytes) {
       return { ok: false, reason: "İçerik çok büyük" };
     }
+    const contentType = res.headers.get("content-type");
 
     const reader = res.body?.getReader();
-    if (!reader) return { ok: true, text: await res.text() };
+    if (!reader) return { ok: true, bytes: new Uint8Array(await res.arrayBuffer()), contentType };
 
     const chunks: Uint8Array[] = [];
     let total = 0;
@@ -160,13 +163,55 @@ export async function fetchTextCapped(
       chunks.push(value);
     }
 
-    return { ok: true, text: new TextDecoder().decode(concat(chunks, total)) };
+    return { ok: true, bytes: concat(chunks, total), contentType };
   } catch (err) {
     return {
       ok: false,
       reason: err instanceof Error ? err.message : "İstek başarısız",
     };
   }
+}
+
+/**
+ * Fetches text with a size cap, so a hostile or broken origin cannot exhaust
+ * memory by streaming indefinitely.
+ */
+export async function fetchTextCapped(
+  url: string,
+  init?: RequestInit
+): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+  const fetched = await fetchBytesCapped(url, init);
+  if (!fetched.ok) return fetched;
+  return { ok: true, text: new TextDecoder().decode(fetched.bytes) };
+}
+
+/**
+ * Same as fetchTextCapped, but a PDF response (by URL extension or real
+ * Content-Type — either alone is a genuine signal) is run through real PDF
+ * text extraction (pdf-extraction.ts) instead of being decoded as UTF-8
+ * text, which would just produce binary garbage. Used only by the fact
+ * research call sites that can legitimately land on a menu/price PDF
+ * (official-site-crawler.ts, direct-research.ts) — fetchTextCapped itself
+ * is left untouched for every other caller (the import pipeline, etc.)
+ * that has no PDF-handling contract and should not silently change shape.
+ */
+export async function fetchTextOrPdfCapped(
+  url: string,
+  init?: RequestInit
+): Promise<{ ok: true; text: string; wasPdf: boolean } | { ok: false; reason: string }> {
+  const fetched = await fetchBytesCapped(url, init);
+  if (!fetched.ok) return fetched;
+
+  const { isPdfUrl, isPdfContentType, extractPdfText } = await import("@/server/services/pdf-extraction");
+  if (isPdfUrl(url) || isPdfContentType(fetched.contentType)) {
+    try {
+      const text = await extractPdfText(fetched.bytes);
+      return { ok: true, text, wasPdf: true };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? `PDF ayrıştırılamadı: ${err.message}` : "PDF ayrıştırılamadı" };
+    }
+  }
+  return { ok: true, text: new TextDecoder().decode(fetched.bytes), wasPdf: false };
 }
 
 function concat(chunks: Uint8Array[], total: number): Uint8Array {
