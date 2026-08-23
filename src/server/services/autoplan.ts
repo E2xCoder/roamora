@@ -25,7 +25,7 @@ import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLeve
 import { resolveResearchSource } from "@/server/services/direct-research";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
-import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS } from "@/server/services/otp-matrix";
+import { fetchTransitMatrix, MAX_OTP_CALLS as OTP_MAX_CALLS, type TransitPairCache } from "@/server/services/otp-matrix";
 import { planBudgetOptimization, type BudgetOptimizationResult } from "@/server/services/budget-optimizer";
 import { findHiddenGemsNearCorridor } from "@/server/services/hidden-gem";
 import { fetchDailyForecast, isBadWeatherDay, type WeatherForecast } from "@/server/providers/research/weather";
@@ -219,6 +219,8 @@ export interface ResearchMetadata {
     skippedDueToCap: number;
     capLimit: number;
     fallbackUsed: boolean;
+    /** Pairs answered from this request's own transitPairCache instead of a fresh OTP call — real savings from a prior routeAndOptimize() stage in the same request, not a stat about OTP itself. */
+    cacheHits: number;
   } | null; // null when profile !== "transit"
   /** Second-stage "Direct Official Source Resolution" metrics (spec §Priority-4) — how often an official domain/page was found and used instead of a generic SearXNG query. */
   officialSource: {
@@ -310,8 +312,34 @@ async function crossCheckAgreement(
   }
 }
 
-export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
-  const trace: ResearchTraceEntry[] = [];
+export interface AutoplanRunOptions {
+  /**
+   * Called synchronously every time a trace entry is recorded, in the same
+   * order autoplan() records it — the same ~30 real stage checkpoints
+   * (geocode, discovery, weather, per-candidate research, routing, reroutes,
+   * ...) already used to build the final `trace` array, just observed live
+   * instead of only after the whole run finishes. Used by the async job
+   * runner (job-runner.ts) to give a polling client real incremental
+   * progress instead of a single "running" state for the whole multi-minute
+   * duration a transit-profile request can take. Never changes what
+   * autoplan() computes — purely an observer.
+   */
+  onProgress?: (entry: ResearchTraceEntry) => void;
+}
+
+/** trace.push() that also notifies onProgress, without changing any of the ~30 existing `trace.push(...)` call sites below. */
+function createTrace(onProgress?: (entry: ResearchTraceEntry) => void): ResearchTraceEntry[] {
+  const arr: ResearchTraceEntry[] = [];
+  if (!onProgress) return arr;
+  arr.push = (...entries: ResearchTraceEntry[]) => {
+    for (const entry of entries) onProgress(entry);
+    return Array.prototype.push.apply(arr, entries);
+  };
+  return arr;
+}
+
+export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions): Promise<AutoplanResult> {
+  const trace = createTrace(opts?.onProgress);
   const maxStops = Math.min(Math.max(req.maxStops ?? 8, 1), 16);
   const profile = req.profile ?? "foot";
   const tripDate = new Date(`${req.date}T12:00:00`);
@@ -941,6 +969,13 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
   });
 
   // --- 5. real routing + the EXISTING deterministic optimizer --------------
+  // Shared across every routeAndOptimize() call this request makes (routing,
+  // hidden-gem-reroute, budget-reroute, departure-safety-reroute) — see
+  // otp-matrix.ts's TransitPairCache doc for why: those reroutes differ by
+  // usually one stop, so re-querying OTP for pairs already resolved a moment
+  // earlier was the dominant real cost behind multi-minute transit requests.
+  const transitPairCache: TransitPairCache = new Map();
+
   async function routeAndOptimize(
     stopsForRoute: Array<{ input: StopInput }>,
     stageLabel: string
@@ -956,7 +991,7 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
     if (profile === "transit") {
       const transitAvailable = caps.find((c) => c.id === "transit")?.available ?? false;
       if (transitAvailable && config.OTP_URL) {
-        const otpMatrix = await fetchTransitMatrix(routePoints, config.OTP_URL, req.date, req.arrivalTime);
+        const otpMatrix = await fetchTransitMatrix(routePoints, config.OTP_URL, req.date, req.arrivalTime, transitPairCache);
         routeMatrix = otpMatrix;
         routeTransitMetadata = {
           totalPairs: otpMatrix.totalPairs,
@@ -965,16 +1000,18 @@ export async function autoplan(req: AutoplanRequest): Promise<AutoplanResult> {
           skippedDueToCap: otpMatrix.skippedDueToCap,
           capLimit: OTP_MAX_CALLS,
           fallbackUsed: otpMatrix.fallbackUsed,
+          cacheHits: otpMatrix.cacheHits,
         };
+        const cacheNote = otpMatrix.cacheHits > 0 ? ` (${otpMatrix.cacheHits} çift bu isteğin önceki bir aşamasından önbellekte)` : "";
         trace.push({
           stage: stageLabel,
           status: otpMatrix.source === "fallback" ? "failed" : "ok",
           detail:
-            otpMatrix.source === "otp"
+            (otpMatrix.source === "otp"
               ? `OpenTripPlanner: ${otpMatrix.otpCalls} durak çifti için gerçek toplu taşıma rotası hesaplandı`
               : otpMatrix.source === "otp+osrm"
                 ? `OpenTripPlanner: ${otpMatrix.otpSucceeded}/${otpMatrix.totalPairs} çift gerçek toplu taşıma verisiyle (${otpMatrix.skippedDueToCap} çift limit nedeniyle denenmedi), kalanı yürüyüşle`
-                : "OpenTripPlanner hiçbir çift için yanıt vermedi, yürüyüş mesafesi kullanıldı",
+                : "OpenTripPlanner hiçbir çift için yanıt vermedi, yürüyüş mesafesi kullanıldı") + cacheNote,
         });
       } else {
         trace.push({

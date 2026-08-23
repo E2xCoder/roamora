@@ -455,10 +455,10 @@ model ProviderCache {
   @@index([expiresAt])
 }
 
-/// Status for long-running work (deep research, large imports, OCR).
+/// Status for long-running work (deep research, large imports, OCR, autoplan).
 model AiJob {
   id   String @id @default(cuid())
-  /// research | import | ocr | classify | optimize
+  /// research | import | ocr | classify | optimize | autoplan | autoplan-options
   kind String
   /// pending | running | done | failed
   status String @default("pending")

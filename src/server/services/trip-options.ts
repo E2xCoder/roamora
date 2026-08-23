@@ -1,5 +1,5 @@
 import "server-only";
-import { autoplan, type AutoplanRequest, type AutoplanResult } from "@/server/services/autoplan";
+import { autoplan, type AutoplanRequest, type AutoplanResult, type ResearchTraceEntry } from "@/server/services/autoplan";
 
 /**
  * Multi-option planning (spec §Priority 9): three real, independently
@@ -107,7 +107,15 @@ export interface TripOptionsResult {
   comparison: TripOptionsComparisonRow[];
 }
 
-export async function planTripOptions(baseRequest: AutoplanRequest): Promise<TripOptionsResult> {
+export interface PlanTripOptionsRunOptions {
+  /** Called for every trace entry from every option's autoplan() run, prefixed with which option (pace) produced it — see AutoplanRunOptions.onProgress. */
+  onProgress?: (pace: TripPace, entry: ResearchTraceEntry) => void;
+}
+
+export async function planTripOptions(
+  baseRequest: AutoplanRequest,
+  opts?: PlanTripOptionsRunOptions
+): Promise<TripOptionsResult> {
   const baseMaxStops = Math.min(Math.max(baseRequest.maxStops ?? 8, 1), 16);
   const baseDepartureBuffer = Math.max(0, baseRequest.departureBufferMinutes ?? 0);
 
@@ -121,13 +129,16 @@ export async function planTripOptions(baseRequest: AutoplanRequest): Promise<Tri
       includeHiddenGems: preset.includeHiddenGems,
     };
 
-    const result = await autoplan({
-      ...baseRequest,
-      maxStops: parametersUsed.maxStops,
-      realismFactor: parametersUsed.realismFactor,
-      departureBufferMinutes: parametersUsed.departureBufferMinutes,
-      includeHiddenGems: parametersUsed.includeHiddenGems,
-    });
+    const result = await autoplan(
+      {
+        ...baseRequest,
+        maxStops: parametersUsed.maxStops,
+        realismFactor: parametersUsed.realismFactor,
+        departureBufferMinutes: parametersUsed.departureBufferMinutes,
+        includeHiddenGems: parametersUsed.includeHiddenGems,
+      },
+      opts?.onProgress ? { onProgress: (entry) => opts.onProgress!(pace, entry) } : undefined
+    );
 
     options.push({ pace, label: preset.label, parametersUsed, result });
   }
