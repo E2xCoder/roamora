@@ -56,6 +56,92 @@ async function fetchJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/**
+ * Real, live-caught gap this closes: a GTFS feed can be a correct, official
+ * catalog match that still downloads and unzips fine, yet be USELESS for
+ * any current date — confirmed live for Prague's PID feed (MobilityData's
+ * indexed copy), whose feed_info.txt/calendar.txt declared real service
+ * dates of 2023-10-26 to 2023-11-05, over two years in the past by the time
+ * this ran. OTP's own graph-build step does eventually reject a feed like
+ * this outright ("no trips within the configured transit service period"),
+ * but only after a full, real (multi-minute, for a large city) graph build
+ * — checking the feed's own declared date range right after download is a
+ * cheap, real pre-flight that surfaces the same honest "this feed can't
+ * actually serve today's dates" fact immediately, and lets provisionCity
+ * try the next real candidate instead of committing to a dead one.
+ * A second real, live-caught gap: a feed can have no calendar.txt at all —
+ * valid GTFS, service defined entirely via calendar_dates.txt date
+ * exceptions — which the checks above silently couldn't see at all,
+ * treating it as "genuinely unknown, not stale" by default and letting a
+ * dead feed straight through. Confirmed live for Rome's ATAC feed: no
+ * feed_info.txt, no calendar.txt, and calendar_dates.txt's real listed
+ * dates ran from 2026-04-27 to 2026-07-11 only — OTP built a graph from it
+ * without error (calendar_dates-only service is completely valid GTFS), but
+ * every real transit query for any date outside that window silently came
+ * back walk-only, which is far easier to miss than a hard build failure.
+ * Falls back to calendar_dates.txt's own max date when no calendar.txt
+ * exists. Returns null only when none of the three sources state a
+ * parseable end date at all — genuinely unknown, not treated as stale.
+ */
+function gtfsFeedEndDate(gtfsPath: string): Date | null {
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(gtfsPath);
+  } catch {
+    return null;
+  }
+  const parseYyyymmdd = (s: string): Date | null => {
+    const m = s.trim().match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (!m) return null;
+    return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  };
+
+  const feedInfo = zip.getEntry("feed_info.txt");
+  if (feedInfo) {
+    const text = feedInfo.getData().toString("utf8").replace(/^﻿/, "");
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const header = lines[0]?.split(",").map((h) => h.trim());
+    const endIdx = header?.indexOf("feed_end_date") ?? -1;
+    if (endIdx >= 0 && lines[1]) {
+      const parsed = parseYyyymmdd(lines[1].split(",")[endIdx] ?? "");
+      if (parsed) return parsed;
+    }
+  }
+
+  const calendar = zip.getEntry("calendar.txt");
+  if (calendar) {
+    const text = calendar.getData().toString("utf8").replace(/^﻿/, "");
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const header = lines[0]?.split(",").map((h) => h.trim());
+    const endIdx = header?.indexOf("end_date") ?? -1;
+    if (endIdx >= 0) {
+      let latest: Date | null = null;
+      for (const line of lines.slice(1)) {
+        const d = parseYyyymmdd(line.split(",")[endIdx] ?? "");
+        if (d && (!latest || d > latest)) latest = d;
+      }
+      if (latest) return latest;
+    }
+  }
+
+  const calendarDates = zip.getEntry("calendar_dates.txt");
+  if (calendarDates) {
+    const text = calendarDates.getData().toString("utf8").replace(/^﻿/, "");
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const header = lines[0]?.split(",").map((h) => h.trim());
+    const dateIdx = header?.indexOf("date") ?? -1;
+    if (dateIdx >= 0) {
+      let latest: Date | null = null;
+      for (const line of lines.slice(1)) {
+        const d = parseYyyymmdd(line.split(",")[dateIdx] ?? "");
+        if (d && (!latest || d > latest)) latest = d;
+      }
+      return latest;
+    }
+  }
+  return null;
+}
+
 async function downloadFile(url: string, destPath: string): Promise<number> {
   const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
@@ -244,21 +330,11 @@ async function provisionCity(cityName: string): Promise<void> {
   if (gtfsCandidates.length === 0) {
     console.log("  UYARI: bu koordinat için MobilityData kataloğunda bir GTFS beslemesi bulunamadı — sadece OSM extract indirilecek");
   } else {
-    const top = gtfsCandidates[0];
     console.log(`  ${gtfsCandidates.length} GTFS adayı bulundu:`);
     for (const c of gtfsCandidates.slice(0, 3)) {
       console.log(`    - ${c.entry.provider} (${c.official ? "resmi" : "resmi değil/bilinmiyor"}, bbox alanı ${c.areaDeg2.toFixed(2)} deg²)`);
     }
-    if (!top.official) {
-      console.log(
-        `  UYARI: seçilen besleme ("${top.entry.provider}") MobilityData tarafından resmi olarak doğrulanmamış — bu şehir için katalogda gerçek yerel işletmeci bulunamamış olabilir. Kullanmadan önce ${top.entry.provider} beslemesinin gerçekten bu şehri kapsadığını manuel doğrula.`
-      );
-    } else {
-      console.log(`  seçildi (resmi kaynak): ${top.entry.provider}`);
-    }
   }
-  const gtfs = gtfsCandidates[0]?.entry;
-  const gtfsOfficial = gtfsCandidates[0]?.official ?? false;
 
   const slug = slugify(cityName);
   const outDir = join(CITIES_DIR, slug);
@@ -269,11 +345,86 @@ async function provisionCity(cityName: string): Promise<void> {
   const pbfBytes = await downloadFile(region.properties.urls.pbf, pbfPath);
   console.log(`  tamamlandı (${(pbfBytes / 1024 / 1024).toFixed(1)} MB)`);
 
-  if (gtfs?.urls.latest) {
-    const gtfsPath = join(outDir, "gtfs.zip");
-    console.log(`  GTFS beslemesi indiriliyor -> ${gtfsPath}`);
-    const gtfsBytes = await downloadFile(gtfs.urls.latest, gtfsPath);
-    console.log(`  tamamlandı (${(gtfsBytes / 1024 / 1024).toFixed(1)} MB)`);
+  // Real, live-observed gap: the catalog's top-ranked (smallest-bbox / most-
+  // official) candidate is sometimes itself a real, correctly-cataloged
+  // entry whose mirror URL is simply dead (confirmed live: Berlin's top VBB
+  // match was its GTFS-Flex variant, 404ing at MobilityData's GCS mirror,
+  // while a second, regular-GTFS VBB entry for the exact same operator
+  // downloaded fine). Trying candidates in ranked order and moving on only
+  // on a genuine download failure keeps every attempt a real, cataloged
+  // feed — never a fabricated or guessed URL — while not letting one dead
+  // mirror sink an otherwise well-covered city.
+  // A feed whose declared end_date is a few weeks/months in the past is
+  // very often still the real, actively-maintained upstream schedule — many
+  // agencies only ever publish a rolling few-month planning horizon and
+  // republish regularly; MobilityData's catalog mirror simply hasn't
+  // re-crawled the latest publish yet (a catalog lag, not the agency having
+  // stopped running). Real, live-observed case: Prague's PID feed's
+  // freshest cataloged copy ends 2026-06-16, ~68 days before this test ran
+  // — genuinely the current real network, not dead data. A feed stale by
+  // GTFS_STALE_REJECT_DAYS or more (here: over 3x that grace period) is a
+  // different, real category — Prague's OTHER cataloged PID entry ends
+  // 2023-10-26, over 1000 days stale, and that one really is unusable.
+  const GTFS_STALE_WARN_DAYS = 30;
+  const GTFS_STALE_REJECT_DAYS = 180;
+  let gtfs: GtfsCandidateRanked["entry"] | undefined;
+  let gtfsOfficial = false;
+  let gtfsStaleDays = 0;
+  let staleFallback: { entry: GtfsCandidateRanked["entry"]; official: boolean; endDate: Date } | null = null;
+  const gtfsPath = join(outDir, "gtfs.zip");
+  const today = new Date();
+  for (const candidate of gtfsCandidates) {
+    if (!candidate.entry.urls.latest) continue;
+    console.log(`  GTFS beslemesi indiriliyor (${candidate.entry.provider}) -> ${gtfsPath}`);
+    try {
+      const gtfsBytes = await downloadFile(candidate.entry.urls.latest, gtfsPath);
+      console.log(`  tamamlandı (${(gtfsBytes / 1024 / 1024).toFixed(1)} MB)`);
+      const endDate = gtfsFeedEndDate(gtfsPath);
+      const staleDays = endDate ? Math.round((today.getTime() - endDate.getTime()) / 86_400_000) : 0;
+      if (endDate && staleDays >= GTFS_STALE_REJECT_DAYS) {
+        console.log(
+          `  UYARI: bu besleme çok eski (gerçek servis tarihleri ${endDate.toISOString().slice(0, 10)} tarihinde sona eriyor, ${staleDays} gün önce) — sıradaki gerçek adaya geçiliyor`
+        );
+        // Keep the freshest-looking stale candidate as a last-resort fallback
+        // rather than discarding it outright — if every real candidate turns
+        // out stale, this is still real, cataloged data, just old, and
+        // reported as such (never silently swapped for a fabricated feed).
+        if (!staleFallback || endDate > staleFallback.endDate) {
+          staleFallback = { entry: candidate.entry, official: candidate.official, endDate };
+        }
+        continue;
+      }
+      if (endDate && staleDays >= GTFS_STALE_WARN_DAYS) {
+        console.log(
+          `  UYARI: kataloglanmış besleme ${staleDays} gün önce (${endDate.toISOString().slice(0, 10)}) sona eriyor görünüyor — muhtemelen MobilityData'nın kataloğu ajansın en güncel yayınını henüz taramamış (bu, ajansın hizmeti durdurduğu anlamına gelmez), ama kullanılmadan önce dikkate alınmalı.`
+        );
+      }
+      gtfs = candidate.entry;
+      gtfsOfficial = candidate.official;
+      gtfsStaleDays = staleDays;
+      break;
+    } catch (err) {
+      console.log(`  UYARI: bu aday indirilemedi (${err instanceof Error ? err.message : err}) — sıradaki gerçek adaya geçiliyor`);
+    }
+  }
+  let gtfsSevereStale = false;
+  if (!gtfs && staleFallback) {
+    // Re-download: the last successful download in the loop above may not
+    // be staleFallback's candidate if a later, also-stale one was tried.
+    await downloadFile(staleFallback.entry.urls.latest!, gtfsPath);
+    gtfs = staleFallback.entry;
+    gtfsOfficial = staleFallback.official;
+    gtfsStaleDays = Math.round((today.getTime() - staleFallback.endDate.getTime()) / 86_400_000);
+    gtfsSevereStale = true;
+  }
+  if (gtfsCandidates.length > 0 && !gtfs) {
+    console.log("  UYARI: kataloglanmış hiçbir GTFS adayı indirilemedi — bu şehir için toplu taşıma verisi olmadan devam ediliyor (uydurma besleme kullanılmadı)");
+  } else if (gtfsSevereStale && staleFallback) {
+    console.log(
+      `  UYARI: MobilityData kataloğunda bu şehir için güncel bir besleme yok — en güncel gerçek aday bile ${staleFallback.endDate.toISOString().slice(0, 10)} tarihinde (${gtfsStaleDays} gün önce) sona eriyor ("${staleFallback.entry.provider}"). Gerçek güncel tarihler için toplu taşıma muhtemelen çalışmayacak; OTP graf inşası muhtemelen başarısız olacak. Uydurma besleme kullanılmadı — bu, katalogdaki gerçek verinin durumu.`
+    );
+  } else if (gtfs) {
+    console.log(gtfsOfficial ? `  seçildi (resmi kaynak): ${gtfs.provider}` : `  UYARI: seçilen besleme ("${gtfs.provider}") MobilityData tarafından resmi olarak doğrulanmamış — kullanmadan önce bu şehri gerçekten kapsadığını manuel doğrula.`);
   }
 
   writeFileSync(
@@ -284,7 +435,7 @@ async function provisionCity(cityName: string): Promise<void> {
         geocoded: geo,
         osmRegion: { id: region.properties.id, name: region.properties.name, url: region.properties.urls.pbf },
         gtfsSource: gtfs
-          ? { mdbSourceId: gtfs.mdb_source_id, provider: gtfs.provider, url: gtfs.urls.latest, official: gtfsOfficial }
+          ? { mdbSourceId: gtfs.mdb_source_id, provider: gtfs.provider, url: gtfs.urls.latest, official: gtfsOfficial, staleDays: gtfsStaleDays, severeStale: gtfsSevereStale }
           : null,
         provisionedAt: new Date().toISOString(),
       },
@@ -301,12 +452,21 @@ function activateCity(slug: string): void {
     console.error(`Hata: infra/otp/cities/${slug}/ bulunamadı — önce bu şehri provision et.`);
     process.exit(1);
   }
+  // Real bug, live-caught: activating city B after city A left A's
+  // .osm.pbf/gtfs.zip/graph.obj sitting alongside B's own files —
+  // `docker compose run otp --build` would then build from BOTH cities'
+  // OSM data at once (or, worse, `docker compose up` could just serve A's
+  // stale graph.obj without ever rebuilding). Exactly one city's data may
+  // ever be in graph_dir/ at a time — clear it before copying the new one.
+  if (existsSync(GRAPH_DIR)) {
+    rmSync(GRAPH_DIR, { recursive: true, force: true });
+  }
   mkdirSync(GRAPH_DIR, { recursive: true });
   for (const file of readdirSync(cityDir)) {
     if (file === "manifest.json") continue;
     cpSync(join(cityDir, file), join(GRAPH_DIR, file));
   }
-  console.log(`${slug} -> infra/otp/graph_dir/ içine kopyalandı.`);
+  console.log(`${slug} -> infra/otp/graph_dir/ içine kopyalandı (önceki şehrin dosyaları temizlendi).`);
   console.log("Şimdi çalıştır: docker compose run --rm otp --build --save /graph");
 }
 

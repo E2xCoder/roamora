@@ -91,6 +91,30 @@ confirmed live for Amsterdam, where the best available match was an
 international night-train operator, not the city's own GVB network).
 Verify an uncertain pick before relying on it.
 
+Two more real gaps the script now handles, both found live during
+multi-city hardening rather than anticipated in advance:
+
+- **A cataloged candidate's mirror URL can 404 even though the entry
+  itself is real and correctly matched** — confirmed live for Berlin: the
+  top-ranked VBB entry was its GTFS-Flex variant, dead at MobilityData's
+  GCS mirror, while a second, regular-GTFS VBB entry for the exact same
+  operator downloaded fine. The script now tries every ranked candidate in
+  order and moves on only on a genuine download failure — never
+  substituting a different, unrelated feed.
+- **A candidate can download fine and still be stale** — confirmed live
+  for Prague: PID's freshest cataloged copy declared real service dates
+  ending 68 days before the test ran (MobilityData's catalog lagging the
+  agency's latest publish, not the agency having stopped running), while
+  an older cataloged PID entry was over 1000 days stale and genuinely
+  unusable (OTP's own graph build rejects a feed like that outright: "no
+  trips within the configured transit service period"). The script now
+  peeks at each downloaded feed's `feed_info.txt`/`calendar.txt` end date
+  before committing to it — stale by 180+ days, try the next real
+  candidate; stale by 30–180 days, use it but warn clearly. If every
+  cataloged candidate is that stale, the freshest one is still used as a
+  last resort with an explicit warning, never silently swapped for
+  invented data.
+
 Multiple cities can be provisioned independently, side by side:
 ```bash
 npm run transit:provision -- "Poznań, Poland" "Berlin, Germany" "Prague, Czech Republic"
@@ -99,8 +123,14 @@ npm run transit:provision -- --list
 
 ### Activating one city and building its graph
 
-Only one city's graph is served at a time. Copy a provisioned city's files
-into the active build directory, then run the existing build step:
+Only one city's graph is served at a time. Activating a city now clears
+`infra/otp/graph_dir/` first — a real bug, live-caught: activating city B
+after city A used to leave A's `.osm.pbf`/`.gtfs.zip`/`graph.obj` sitting
+alongside B's own files, so `docker compose run otp --build` would build
+from both cities' OSM data at once, or `docker compose up` could just
+serve A's stale graph.obj without ever rebuilding. Copy a provisioned
+city's files into the (now-clean) active build directory, then run the
+existing build step:
 
 ```bash
 npm run transit:provision -- --activate poznan-poland
