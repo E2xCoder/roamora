@@ -115,6 +115,18 @@ export interface AutoplanRequest {
   realismFactor?: number;
   /** Set false to skip the Priority-5 hidden-gem stage entirely — used by trip-options.ts's "Relaxed" pace to keep the day less packed. Defaults to true (unchanged existing behavior) when unset. */
   includeHiddenGems?: boolean;
+  /**
+   * Real OSM place ids (e.g. "osm:node:123") to drop from discovery before
+   * scoring — used by a multi-day trip planner (each day's autoplan() call
+   * is otherwise independent and has no memory of what a previous day
+   * already scheduled, so the same top-scored attraction could legitimately
+   * repeat every day). Filtering at the candidate-pool stage, before
+   * scoreCandidates/pruneAndDiversify run, means the exact same discovery
+   * and optimizer logic decides what fills the gap — this never removes an
+   * already-built itinerary's stop, only prevents one from being discovered
+   * again in the first place.
+   */
+  excludePlaceIds?: string[];
 }
 
 export interface StopProvenance {
@@ -343,6 +355,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
   const maxStops = Math.min(Math.max(req.maxStops ?? 8, 1), 16);
   const profile = req.profile ?? "foot";
   const tripDate = new Date(`${req.date}T12:00:00`);
+  const excludeIds = new Set(req.excludePlaceIds ?? []);
 
   // --- 1. destination ------------------------------------------------------
   const destGeo = await geocodeOnce(req.destination);
@@ -402,6 +415,10 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       detail: err instanceof Error ? err.message : "Overpass hatası",
     });
     throw new AutoplanError("DISCOVERY_FAILED", "Yer keşfi başarısız oldu.");
+  }
+
+  if (excludeIds.size > 0) {
+    discovered = discovered.filter((d) => !excludeIds.has(d.id));
   }
 
   if (discovered.length === 0) {

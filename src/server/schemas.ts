@@ -165,6 +165,7 @@ export const autoplanRequestSchema = z.object({
   foodPreferences: z.array(z.string().trim().min(1).max(60)).max(10).optional(),
   realismFactor: z.number().min(1).max(2).optional(),
   includeHiddenGems: z.boolean().optional(),
+  excludePlaceIds: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
 });
 
 export const optimizeRequestSchema = z.object({
