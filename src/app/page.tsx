@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Sparkles, MapPin, Calendar, Wand2, Loader2, ChevronDown, AlertCircle,
   Wallet, Footprints, TrainFront, Home as HomeIcon, UtensilsCrossed, Gauge, Check,
@@ -48,8 +48,9 @@ const STAGE_CHECKLIST: Array<{ key: string; label: string }> = [
   { key: "departure-safety", label: "Kalkış güvenliği kontrol ediliyor" },
 ];
 
-export default function HomePage() {
+function HomeContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   // Structured fields
   const [destination, setDestination] = useState("");
@@ -96,6 +97,12 @@ export default function HomePage() {
       .then((trips) => setRecentTrips(Array.isArray(trips) ? trips.slice(0, 3) : []))
       .catch(() => {});
   }, []);
+
+  // Bridge from Explore's "Bu şehri planla" CTA — pre-fills, never auto-submits, stays editable.
+  useEffect(() => {
+    const fromExplore = searchParams.get("destination");
+    if (fromExplore) setDestination(fromExplore);
+  }, [searchParams]);
 
   // --- destination resolution (debounced, single-match confirmation) ---
   const destTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -632,5 +639,13 @@ export default function HomePage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense fallback={null}>
+      <HomeContent />
+    </Suspense>
   );
 }

@@ -2,7 +2,8 @@
 
 import { useState, useMemo } from "react";
 import dynamic from "next/dynamic";
-import { Search, Compass, Star, Loader2, Plus, CheckCircle, Gem } from "lucide-react";
+import Link from "next/link";
+import { Search, Compass, Star, Loader2, Plus, CheckCircle, Gem, Sparkles } from "lucide-react";
 import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
 
@@ -212,6 +213,23 @@ export default function ExplorePage() {
 
         {error && <p className="text-xs text-danger mt-2">{error}</p>}
 
+        {/* Primary bridge into the autonomous planner — discovery here should lead to a real plan, not dead-end at manual saves */}
+        {cityName && (
+          <Link
+            href={`/?destination=${encodeURIComponent(cityName)}`}
+            className="mt-4 flex items-center justify-between gap-3 px-5 py-4 rounded-2xl gradient-brand text-white shadow-[var(--shadow-md)] hover:opacity-95 transition-opacity"
+          >
+            <div className="flex items-center gap-3">
+              <Sparkles size={18} />
+              <div>
+                <p className="text-sm font-semibold">{cityName} için otonom bir gezi planla</p>
+                <p className="text-xs text-white/80">Roamora rota, restoran, gizli hazine ve bütçeyi kendisi araştırsın</p>
+              </div>
+            </div>
+            <span className="text-xs font-semibold whitespace-nowrap">Planla →</span>
+          </Link>
+        )}
+
         {!cityName && (
           <div className="mt-5">
             <p className="text-xs font-semibold text-muted-fg uppercase tracking-wider mb-2">Popüler Şehirler</p>
@@ -284,10 +302,11 @@ export default function ExplorePage() {
                     <button
                       onClick={() => savePOI(poi)}
                       disabled={isSaved}
-                      className={`shrink-0 p-2.5 rounded-xl transition-all ${isSaved ? "bg-success-light text-success" : "bg-primary-light text-primary hover:bg-primary hover:text-white"}`}
-                      aria-label={isSaved ? "Kaydedildi" : "Kaydet"}
+                      title="Haritada kişisel kaydet — otonom planlamayı etkilemez"
+                      className={`shrink-0 p-2 rounded-xl border transition-all ${isSaved ? "border-success/30 text-success" : "border-card-border text-muted hover:text-foreground hover:border-muted"}`}
+                      aria-label={isSaved ? "Kaydedildi" : "Haritada kaydet"}
                     >
-                      {isSaved ? <CheckCircle size={16} /> : <Plus size={16} />}
+                      {isSaved ? <CheckCircle size={14} /> : <Plus size={14} />}
                     </button>
                   </div>
                 </Card>
@@ -311,10 +330,11 @@ export default function ExplorePage() {
                       <button
                         onClick={() => saveWikiListing(listing, i)}
                         disabled={isSaved}
-                        className={`shrink-0 p-2.5 rounded-xl transition-all ${isSaved ? "bg-success-light text-success" : "bg-secondary-light text-secondary hover:bg-secondary hover:text-white"}`}
-                        aria-label={isSaved ? "Kaydedildi" : "Kaydet"}
+                        title="Haritada kişisel kaydet — otonom planlamayı etkilemez"
+                        className={`shrink-0 p-2 rounded-xl border transition-all ${isSaved ? "border-success/30 text-success" : "border-card-border text-muted hover:text-foreground hover:border-muted"}`}
+                        aria-label={isSaved ? "Kaydedildi" : "Haritada kaydet"}
                       >
-                        {isSaved ? <CheckCircle size={16} /> : <Plus size={16} />}
+                        {isSaved ? <CheckCircle size={14} /> : <Plus size={14} />}
                       </button>
                     )}
                   </div>

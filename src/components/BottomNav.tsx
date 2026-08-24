@@ -5,16 +5,26 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Sparkles, CalendarDays, Compass, Map, Mountain, Upload, MoreHorizontal, X } from "lucide-react";
 
-/** The core product is trip planning — these four get equal, full-weight nav treatment. */
+/**
+ * Product audit (see git log): Roamora's core loop is "tell it where/when,
+ * it plans the trip" - exactly three real flows serve that loop end to
+ * end: create (Plan), view (Trips), pre-planning discovery (Explore).
+ * Map/Hiking/Import are real, fully-working features, but each serves a
+ * *different* workflow (manual place curation, trail lookup by name,
+ * one-time data migration) than the autonomous promise this nav should
+ * lead with - keeping them primary is exactly the "GIS control panel"
+ * feeling the redesign is meant to move away from. Demoted to secondary,
+ * not removed: nothing here is broken or low-value, it's just not the
+ * first thing a new user should see.
+ */
 const PRIMARY_NAV = [
   { href: "/", label: "Plan", icon: Sparkles },
   { href: "/trips", label: "Trips", icon: CalendarDays },
   { href: "/explore", label: "Explore", icon: Compass },
-  { href: "/map", label: "Map", icon: Map },
 ];
 
-/** Real features, just not the primary flow — de-emphasized rather than hidden. */
 const SECONDARY_NAV = [
+  { href: "/map", label: "Harita", icon: Map },
   { href: "/hiking", label: "Hiking", icon: Mountain },
   { href: "/import", label: "Import", icon: Upload },
 ];
@@ -51,7 +61,7 @@ export default function BottomNav() {
           <button
             onClick={() => setMoreOpen((v) => !v)}
             aria-expanded={moreOpen}
-            aria-label="Diğer araçlar"
+            aria-label="Araçlar"
             className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl transition-all ${
               isSecondaryActive || moreOpen ? "text-primary" : "text-muted hover:text-foreground"
             }`}
@@ -59,7 +69,7 @@ export default function BottomNav() {
             <div className={`p-1.5 rounded-xl transition-all ${isSecondaryActive || moreOpen ? "bg-primary-light" : ""}`}>
               {moreOpen ? <X size={20} strokeWidth={2.2} /> : <MoreHorizontal size={20} strokeWidth={1.8} />}
             </div>
-            <span className="text-[10px] font-medium">Diğer</span>
+            <span className="text-[10px] font-medium">Araçlar</span>
           </button>
         </div>
 
