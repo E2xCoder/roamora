@@ -115,12 +115,12 @@ export default function ImportPage() {
       {/* Header */}
       <div className="px-6 pt-6 pb-4">
         <div className="flex items-center gap-3 mb-1">
-          <div className="w-10 h-10 rounded-2xl gradient-primary flex items-center justify-center">
+          <div className="w-10 h-10 rounded-2xl bg-primary flex items-center justify-center">
             <Upload size={20} className="text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold">Veri Import</h1>
-            <p className="text-xs text-muted">Google Maps verilerini ice aktar</p>
+            <h1 className="text-xl font-bold">Kaydettiğin yerleri içe aktar</h1>
+            <p className="text-xs text-muted-fg">Google Maps&apos;ten getir, Roamora düzenlesin ve zenginleştirsin</p>
           </div>
         </div>
       </div>
@@ -128,13 +128,13 @@ export default function ImportPage() {
       <div className="px-6 max-w-2xl pb-24 space-y-6">
         {/* Results */}
         {result && (
-          <div className="p-5 bg-success/10 border border-success/20 rounded-3xl flex items-center gap-4 animate-slide-up">
-            <div className="w-10 h-10 rounded-2xl bg-success/20 flex items-center justify-center shrink-0">
+          <div className="p-5 bg-success-light border border-success/20 rounded-3xl flex items-center gap-4 animate-slide-up">
+            <div className="w-10 h-10 rounded-2xl bg-success/15 flex items-center justify-center shrink-0">
               <CheckCircle size={20} className="text-success" />
             </div>
             <div>
               <p className="font-semibold text-sm">Import tamamlandi!</p>
-              <p className="text-xs text-muted">
+              <p className="text-xs text-muted-fg">
                 {result.imported} yer eklendi (toplam: {result.total})
                 {result.geocoded != null && (
                   <> — {result.geocoded} koordinat bulundu, {result.skipped} atlandi</>
@@ -145,13 +145,13 @@ export default function ImportPage() {
         )}
 
         {error && (
-          <div className="p-5 bg-danger/10 border border-danger/20 rounded-3xl flex items-center gap-4 animate-slide-up">
-            <div className="w-10 h-10 rounded-2xl bg-danger/20 flex items-center justify-center shrink-0">
+          <div className="p-5 bg-danger-light border border-danger/20 rounded-3xl flex items-center gap-4 animate-slide-up">
+            <div className="w-10 h-10 rounded-2xl bg-danger/15 flex items-center justify-center shrink-0">
               <AlertCircle size={20} className="text-danger" />
             </div>
             <div>
               <p className="font-semibold text-sm text-danger">Hata!</p>
-              <p className="text-xs text-muted">{error}</p>
+              <p className="text-xs text-muted-fg">{error}</p>
             </div>
           </div>
         )}
@@ -165,7 +165,7 @@ export default function ImportPage() {
               </div>
               <div>
                 <h2 className="font-bold text-sm">Google Maps CSV</h2>
-                <p className="text-xs text-muted">
+                <p className="text-xs text-muted-fg">
                   Takeout&apos;tan CSV dosyası yükle
                 </p>
               </div>
@@ -200,7 +200,7 @@ export default function ImportPage() {
                 ) : (
                   <div className="text-center">
                     <FileSpreadsheet size={24} className="text-muted mx-auto mb-2" />
-                    <p className="text-xs text-muted">CSV dosyasini tikla veya surukle</p>
+                    <p className="text-xs text-muted-fg">CSV dosyasini tikla veya surukle</p>
                   </div>
                 )}
               </div>
@@ -217,7 +217,7 @@ export default function ImportPage() {
               </div>
               <div>
                 <h2 className="font-bold text-sm">Google Maps JSON</h2>
-                <p className="text-xs text-muted">GeoJSON formatinda export</p>
+                <p className="text-xs text-muted-fg">GeoJSON formatinda export</p>
               </div>
             </div>
 
@@ -245,7 +245,7 @@ export default function ImportPage() {
               <div className="flex items-center justify-center h-28 border-2 border-dashed border-card-border rounded-2xl hover:border-primary/50 hover:bg-primary-light/30 transition-all">
                 <div className="text-center">
                   <FileJson size={24} className="text-muted mx-auto mb-2" />
-                  <p className="text-xs text-muted">JSON dosyasini tikla veya surukle</p>
+                  <p className="text-xs text-muted-fg">JSON dosyasini tikla veya surukle</p>
                 </div>
               </div>
             </label>
@@ -259,8 +259,8 @@ export default function ImportPage() {
             Harita sayfasinda haritaya tiklayarak veya link yapistirarak yer ekle
           </p>
           <Link
-            href="/"
-            className="inline-flex items-center gap-2 px-5 py-3 gradient-primary text-white rounded-2xl text-sm font-semibold hover:opacity-90 transition-opacity"
+            href="/map"
+            className="inline-flex items-center gap-2 px-5 py-3 bg-primary text-white rounded-2xl text-sm font-semibold hover:bg-primary-hover transition-colors"
           >
             Haritaya Git
             <ArrowRight size={14} />

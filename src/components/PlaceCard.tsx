@@ -13,11 +13,11 @@ interface PlaceCardProps {
 
 const SOURCE_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   tiktok: { bg: "bg-black/80", text: "text-white", label: "TikTok" },
-  instagram: { bg: "gradient-warm", text: "text-white", label: "Instagram" },
+  instagram: { bg: "bg-accent", text: "text-white", label: "Instagram" },
   google: { bg: "bg-blue-500", text: "text-white", label: "Google" },
-  overpass: { bg: "gradient-nature", text: "text-white", label: "OSM" },
+  overpass: { bg: "bg-success", text: "text-white", label: "OSM" },
   manual: { bg: "bg-muted", text: "text-white", label: "Manuel" },
-  social: { bg: "gradient-cool", text: "text-white", label: "Social" },
+  social: { bg: "bg-secondary", text: "text-white", label: "Social" },
 };
 
 export default function PlaceCard({ place, categoryIcon, onDelete }: PlaceCardProps) {

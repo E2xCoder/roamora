@@ -324,7 +324,7 @@ export default function PlaceDetailPage() {
                 <button
                   onClick={saveNotes}
                   disabled={savingNotes}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 gradient-primary text-white rounded-xl text-xs font-semibold disabled:opacity-40"
+                  className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 bg-primary text-white rounded-xl text-xs font-semibold disabled:opacity-40"
                 >
                   {savingNotes ? (
                     <Loader2 size={12} className="animate-spin" />

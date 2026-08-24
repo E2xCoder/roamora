@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import dynamic from "next/dynamic";
-import { Search, Compass, MapPin, Star, Loader2, Plus, CheckCircle } from "lucide-react";
+import { Search, Compass, Star, Loader2, Plus, CheckCircle, Gem } from "lucide-react";
+import Card from "@/components/ui/Card";
+import Button from "@/components/ui/Button";
 
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
 
@@ -33,41 +35,100 @@ const POPULAR_CITIES = [
   { name: "Lisbon", lat: 38.7223, lng: -9.1393 },
 ];
 
+type CategoryFilter = "popular" | "hidden-gems" | "food" | "free" | "museums" | "architecture" | "photo";
+
+const CATEGORIES: Array<{ id: CategoryFilter; label: string }> = [
+  { id: "popular", label: "Popüler" },
+  { id: "hidden-gems", label: "Gizli Hazineler" },
+  { id: "food", label: "Yemek" },
+  { id: "free", label: "Ücretsiz" },
+  { id: "museums", label: "Müzeler" },
+  { id: "architecture", label: "Mimari" },
+  { id: "photo", label: "Fotoğraf Noktaları" },
+];
+
+/** Real client-side tag filtering over already-fetched OSM data — /api/explore has no server-side category param, so this narrows down what's already real, not a fabricated grouping. */
+function matchesCategory(poi: OverpassPOI, cat: CategoryFilter): boolean {
+  const t = poi.tags;
+  switch (cat) {
+    case "popular": return true;
+    case "hidden-gems": return true; // every overpass result here already came from the same "notable but not mainstream" query getHiddenGems() runs
+    case "food": return Boolean(t.amenity === "restaurant" || t.amenity === "cafe" || t.amenity === "bar" || t.cuisine);
+    case "free": return t.fee === "no" || (!t.fee && !t.charge);
+    case "museums": return t.tourism === "museum" || t.tourism === "gallery";
+    case "architecture": return Boolean(t.historic || t.building === "cathedral" || t.building === "castle" || t.amenity === "place_of_worship");
+    case "photo": return t.tourism === "viewpoint" || t.tourism === "artwork" || Boolean(t.natural);
+    default: return true;
+  }
+}
+
 export default function ExplorePage() {
-  const [searchQuery, setSearchQuery] = useState("");
+  const [cityQuery, setCityQuery] = useState("");
+  const [cityName, setCityName] = useState<string | null>(null);
   const [pois, setPois] = useState<OverpassPOI[]>([]);
   const [wikiListings, setWikiListings] = useState<WikiListing[]>([]);
-  const [wikiTitle, setWikiTitle] = useState("");
   const [loading, setLoading] = useState(false);
-  const [lat, setLat] = useState("");
-  const [lng, setLng] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+  const [category, setCategory] = useState<CategoryFilter>("popular");
 
-  async function searchOverpass(latVal?: number, lngVal?: number) {
-    const searchLat = latVal?.toString() || lat;
-    const searchLng = lngVal?.toString() || lng;
-    if (!searchLat || !searchLng) return;
+  async function exploreCity(name: string, coords?: { lat: number; lng: number }) {
     setLoading(true);
-    const res = await fetch(
-      `/api/explore?source=overpass&lat=${searchLat}&lng=${searchLng}&radius=10000`
-    );
-    const data = await res.json();
-    setPois(data);
-    setLoading(false);
-  }
+    setError(null);
+    setCityName(name);
+    setCityQuery(name);
+    try {
+      let lat = coords?.lat;
+      let lng = coords?.lng;
+      if (lat == null || lng == null) {
+        const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(name)}`);
+        if (!geoRes.ok) {
+          const body = await geoRes.json().catch(() => null);
+          setError(body?.error ?? "Şehir bulunamadı");
+          setLoading(false);
+          return;
+        }
+        const geo = await geoRes.json();
+        lat = geo.lat; lng = geo.lng;
+      }
 
-  async function searchWikivoyage() {
-    if (!searchQuery) return;
-    setLoading(true);
-    const res = await fetch(
-      `/api/explore?source=wikivoyage&q=${encodeURIComponent(searchQuery)}`
-    );
-    const data = await res.json();
-    if (data.listings) {
-      setWikiListings(data.listings);
-      setWikiTitle(data.title);
+      const [overpassRes, wikiRes] = await Promise.all([
+        fetch(`/api/explore?source=overpass&lat=${lat}&lng=${lng}&radius=10000`),
+        fetch(`/api/explore?source=wikivoyage&q=${encodeURIComponent(name)}`),
+      ]);
+
+      let overpassFailed = false;
+      if (overpassRes.ok) {
+        setPois(await overpassRes.json());
+      } else {
+        overpassFailed = true;
+        setPois([]);
+      }
+
+      let wikiFailed = false;
+      if (wikiRes.ok) {
+        const data = await wikiRes.json();
+        setWikiListings(data.listings ?? []);
+      } else {
+        wikiFailed = true;
+        setWikiListings([]);
+      }
+
+      // Partial degradation is real and should say so honestly — a source
+      // outage (e.g. the public Overpass API rate-limiting under load) is
+      // not the same as "no places exist here".
+      if (overpassFailed && wikiFailed) {
+        setError("Şu an hiçbir kaynağa ulaşılamıyor — birazdan tekrar dene.");
+      } else if (overpassFailed) {
+        setError("OpenStreetMap kaynağına şu an ulaşılamıyor — Wikivoyage sonuçları gösteriliyor.");
+      } else if (wikiFailed) {
+        setError("Wikivoyage kaynağına şu an ulaşılamıyor — OpenStreetMap sonuçları gösteriliyor.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   async function savePOI(poi: OverpassPOI) {
@@ -106,215 +167,163 @@ export default function ExplorePage() {
     setSavedIds((prev) => new Set([...prev, `wiki-${idx}`]));
   }
 
-  function handleCityClick(city: { name: string; lat: number; lng: number }) {
-    setLat(city.lat.toString());
-    setLng(city.lng.toString());
-    setSearchQuery(city.name);
-    searchOverpass(city.lat, city.lng);
-  }
+  const filteredPois = useMemo(
+    () => pois.filter((p) => p.tags.name && matchesCategory(p, category)),
+    [pois, category]
+  );
 
   const mapPlaces = [
-    ...pois
-      .filter((p) => p.tags.name)
-      .map((p) => ({
-        id: `poi-${p.id}`,
-        name: p.tags.name,
-        lat: p.lat,
-        lng: p.lon,
-        category: "hidden-gem",
-        notes: "",
-        tags: [],
-      })),
-    ...wikiListings
-      .filter((l) => l.lat && l.lng)
-      .map((l, i) => ({
-        id: `wiki-${i}`,
-        name: l.name,
-        lat: l.lat!,
-        lng: l.lng!,
-        category: "hidden-gem",
-        notes: l.description || "",
-        tags: [],
-      })),
+    ...filteredPois.map((p) => ({
+      id: `poi-${p.id}`, name: p.tags.name, lat: p.lat, lng: p.lon,
+      category: "hidden-gem", notes: "", tags: [],
+    })),
+    ...wikiListings.filter((l) => l.lat && l.lng).map((l, i) => ({
+      id: `wiki-${i}`, name: l.name, lat: l.lat!, lng: l.lng!,
+      category: "hidden-gem", notes: l.description || "", tags: [],
+    })),
   ];
 
-  return (
-    <div className="min-h-screen">
-      {/* Header */}
-      <div className="px-6 pt-6 pb-4">
-        <div className="flex items-center gap-3 mb-1">
-          <div className="w-10 h-10 rounded-2xl gradient-cool flex items-center justify-center">
-            <Compass size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold">Kesfet</h1>
-            <p className="text-xs text-muted">Hidden gems & yerel oneriler</p>
-          </div>
-        </div>
-      </div>
+  const hasResults = filteredPois.length > 0 || wikiListings.length > 0;
 
-      {/* Search bars */}
-      <div className="px-6 space-y-3 mb-6">
-        <div className="flex gap-2">
+  return (
+    <div className="min-h-screen pb-24">
+      <div className="px-6 pt-6 pb-5 max-w-6xl mx-auto">
+        <h1 className="text-2xl font-bold">
+          {cityName ? `${cityName} Keşfet` : "Keşfet"}
+        </h1>
+        <p className="text-sm text-muted-fg mt-0.5">Gizli hazineler ve yerel öneriler — gerçek OSM ve Wikivoyage verisi</p>
+
+        <div className="flex gap-2 mt-4 max-w-lg">
           <div className="flex-1 min-w-0 flex items-center bg-card border border-card-border rounded-2xl overflow-hidden focus-within:border-primary/50 focus-within:shadow-[0_0_0_4px_var(--primary-glow)] transition-all">
-            <Star size={16} className="ml-4 text-secondary shrink-0" />
+            <Search size={16} className="ml-4 text-muted shrink-0" />
             <input
               type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && searchWikivoyage()}
-              placeholder="Sehir adi (Wikivoyage)"
+              value={cityQuery}
+              onChange={(e) => setCityQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && cityQuery.trim() && exploreCity(cityQuery.trim())}
+              placeholder="Bir şehir ara…"
               className="flex-1 px-3 py-3 bg-transparent text-sm focus:outline-none"
             />
           </div>
-          <button
-            onClick={searchWikivoyage}
-            disabled={loading || !searchQuery}
-            className="px-5 py-3 gradient-primary text-white rounded-2xl text-sm font-semibold disabled:opacity-40 flex items-center gap-2"
-          >
+          <Button onClick={() => cityQuery.trim() && exploreCity(cityQuery.trim())} disabled={loading || !cityQuery.trim()} variant="primary">
             {loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-          </button>
+          </Button>
         </div>
 
-        <div className="flex gap-2">
-          <input
-            type="number"
-            step="any"
-            placeholder="Lat"
-            value={lat}
-            onChange={(e) => setLat(e.target.value)}
-            className="flex-1 min-w-0 px-4 py-3 bg-card border border-card-border rounded-2xl text-sm focus:outline-none focus:border-primary/50"
-          />
-          <input
-            type="number"
-            step="any"
-            placeholder="Lng"
-            value={lng}
-            onChange={(e) => setLng(e.target.value)}
-            className="flex-1 min-w-0 px-4 py-3 bg-card border border-card-border rounded-2xl text-sm focus:outline-none focus:border-primary/50"
-          />
-          <button
-            onClick={() => searchOverpass()}
-            disabled={loading || !lat || !lng}
-            className="px-5 py-3 gradient-nature text-white rounded-2xl text-sm font-semibold disabled:opacity-40 flex items-center gap-2"
-          >
-            <MapPin size={14} />
-          </button>
-        </div>
+        {error && <p className="text-xs text-danger mt-2">{error}</p>}
+
+        {!cityName && (
+          <div className="mt-5">
+            <p className="text-xs font-semibold text-muted-fg uppercase tracking-wider mb-2">Popüler Şehirler</p>
+            <div className="flex gap-2 overflow-x-auto hide-scrollbar">
+              {POPULAR_CITIES.map((city) => (
+                <button
+                  key={city.name}
+                  onClick={() => exploreCity(city.name, city)}
+                  className="shrink-0 px-4 py-2.5 bg-card border border-card-border rounded-2xl text-sm font-medium hover:border-primary/50 hover:shadow-[var(--shadow-sm)] transition-all"
+                >
+                  {city.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {cityName && (
+          <div className="mt-4 flex gap-2 overflow-x-auto hide-scrollbar">
+            {CATEGORIES.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => setCategory(c.id)}
+                className={`shrink-0 px-3.5 py-2 rounded-full text-xs font-medium transition-all ${
+                  category === c.id ? "bg-primary text-white" : "bg-surface text-muted-fg hover:text-foreground"
+                }`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Popular cities */}
-      <div className="px-6 mb-6">
-        <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Populer Sehirler</p>
-        <div className="flex gap-2 overflow-x-auto hide-scrollbar">
-          {POPULAR_CITIES.map((city) => (
-            <button
-              key={city.name}
-              onClick={() => handleCityClick(city)}
-              className="shrink-0 px-4 py-2.5 bg-card border border-card-border rounded-2xl text-sm font-medium hover:border-primary/50 hover:shadow-[var(--shadow-md)] transition-all"
-            >
-              {city.name}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Content — never appears empty (spec §22): popular cities above when idle, real results/empty-but-helpful state once a city is picked */}
+      {cityName && (
+        <div className="px-6 max-w-6xl mx-auto grid lg:grid-cols-[1fr_400px] gap-5">
+          <div className="h-[360px] lg:h-[560px] rounded-3xl overflow-hidden border border-card-border shadow-[var(--shadow-md)] order-1">
+            <MapView places={mapPlaces} />
+          </div>
 
-      {/* Content */}
-      <div className="px-6 pb-24 grid lg:grid-cols-[1fr_400px] gap-6">
-        {/* Map */}
-        <div className="h-[400px] lg:h-[500px] rounded-3xl overflow-hidden border border-card-border shadow-[var(--shadow-md)]">
-          <MapView places={mapPlaces} />
-        </div>
+          <div className="space-y-3 max-h-[560px] overflow-y-auto hide-scrollbar order-2">
+            {loading && (
+              <div className="text-center py-16"><Loader2 size={20} className="animate-spin text-primary mx-auto" /></div>
+            )}
 
-        {/* Results */}
-        <div className="space-y-3 max-h-[500px] overflow-y-auto hide-scrollbar">
-          {wikiTitle && (
-            <div className="flex items-center gap-2 px-1">
-              <Star size={14} className="text-secondary" />
-              <p className="text-sm font-semibold">{wikiTitle}</p>
-            </div>
-          )}
+            {!loading && !hasResults && (
+              <Card padding="lg" className="text-center">
+                <Compass size={26} className="text-muted mx-auto mb-2" />
+                <p className="text-sm font-medium">Bu kategoride sonuç yok</p>
+                <p className="text-xs text-muted-fg mt-1">Başka bir kategori dene</p>
+              </Card>
+            )}
 
-          {pois.length === 0 && wikiListings.length === 0 && !loading && (
-            <div className="text-center py-16">
-              <div className="w-16 h-16 rounded-3xl gradient-cool flex items-center justify-center mx-auto mb-4 opacity-50">
-                <Compass size={28} className="text-white" />
-              </div>
-              <p className="text-sm text-muted">Sehir ya da koordinat ile arama yap</p>
-            </div>
-          )}
-
-          {pois
-            .filter((p) => p.tags.name)
-            .map((poi) => {
+            {filteredPois.map((poi) => {
               const isSaved = savedIds.has(`poi-${poi.id}`);
               return (
-                <div
-                  key={poi.id}
-                  className="bg-card border border-card-border rounded-2xl p-4 hover:shadow-[var(--shadow-md)] transition-all"
-                >
+                <Card key={poi.id} padding="md">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      <h4 className="font-semibold text-sm">{poi.tags.name}</h4>
-                      <p className="text-xs text-muted mt-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <Gem size={12} className="text-accent shrink-0" />
+                        <h4 className="font-semibold text-sm truncate">{poi.tags.name}</h4>
+                      </div>
+                      <p className="text-xs text-muted-fg mt-0.5">
                         {poi.tags.tourism || poi.tags.historic || poi.tags.natural || "POI"}
                       </p>
-                      {poi.tags.description && (
-                        <p className="text-[11px] text-muted mt-1 line-clamp-2">{poi.tags.description}</p>
-                      )}
+                      {poi.tags.description && <p className="text-[11px] text-muted-fg mt-1 line-clamp-2">{poi.tags.description}</p>}
                     </div>
                     <button
                       onClick={() => savePOI(poi)}
                       disabled={isSaved}
-                      className={`shrink-0 p-2.5 rounded-xl transition-all ${
-                        isSaved
-                          ? "bg-success/10 text-success"
-                          : "bg-primary-light text-primary hover:bg-primary hover:text-white"
-                      }`}
+                      className={`shrink-0 p-2.5 rounded-xl transition-all ${isSaved ? "bg-success-light text-success" : "bg-primary-light text-primary hover:bg-primary hover:text-white"}`}
+                      aria-label={isSaved ? "Kaydedildi" : "Kaydet"}
                     >
                       {isSaved ? <CheckCircle size={16} /> : <Plus size={16} />}
                     </button>
                   </div>
-                </div>
+                </Card>
               );
             })}
 
-          {wikiListings.map((listing, i) => {
-            const isSaved = savedIds.has(`wiki-${i}`);
-            return (
-              <div
-                key={i}
-                className="bg-card border border-card-border rounded-2xl p-4 hover:shadow-[var(--shadow-md)] transition-all"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <h4 className="font-semibold text-sm">{listing.name}</h4>
-                    {listing.address && (
-                      <p className="text-[11px] text-muted mt-0.5">{listing.address}</p>
-                    )}
-                    {listing.description && (
-                      <p className="text-[11px] text-muted mt-1 line-clamp-2">{listing.description}</p>
+            {wikiListings.map((listing, i) => {
+              const isSaved = savedIds.has(`wiki-${i}`);
+              return (
+                <Card key={i} padding="md">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <Star size={12} className="text-secondary shrink-0" />
+                        <h4 className="font-semibold text-sm truncate">{listing.name}</h4>
+                      </div>
+                      {listing.address && <p className="text-[11px] text-muted-fg mt-0.5">{listing.address}</p>}
+                      {listing.description && <p className="text-[11px] text-muted-fg mt-1 line-clamp-2">{listing.description}</p>}
+                    </div>
+                    {listing.lat && listing.lng && (
+                      <button
+                        onClick={() => saveWikiListing(listing, i)}
+                        disabled={isSaved}
+                        className={`shrink-0 p-2.5 rounded-xl transition-all ${isSaved ? "bg-success-light text-success" : "bg-secondary-light text-secondary hover:bg-secondary hover:text-white"}`}
+                        aria-label={isSaved ? "Kaydedildi" : "Kaydet"}
+                      >
+                        {isSaved ? <CheckCircle size={16} /> : <Plus size={16} />}
+                      </button>
                     )}
                   </div>
-                  {listing.lat && listing.lng && (
-                    <button
-                      onClick={() => saveWikiListing(listing, i)}
-                      disabled={isSaved}
-                      className={`shrink-0 p-2.5 rounded-xl transition-all ${
-                        isSaved
-                          ? "bg-success/10 text-success"
-                          : "bg-secondary-light text-secondary hover:bg-secondary hover:text-white"
-                      }`}
-                    >
-                      {isSaved ? <CheckCircle size={16} /> : <Plus size={16} />}
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                </Card>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

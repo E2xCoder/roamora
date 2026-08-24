@@ -163,7 +163,7 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
       {/* Hero */}
       {!proposal && !saved && (
         <div className="text-center mb-5">
-          <div className="w-14 h-14 rounded-3xl gradient-primary flex items-center justify-center mx-auto mb-3">
+          <div className="w-14 h-14 rounded-3xl bg-primary flex items-center justify-center mx-auto mb-3">
             <Sparkles size={24} className="text-white" />
           </div>
           <h3 className="font-bold text-base">Bağlantıdan yer ekle</h3>
@@ -188,7 +188,7 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
         <button
           onClick={handleAnalyze}
           disabled={busy || !urlInput.trim()}
-          className="m-1.5 px-4 py-2 gradient-primary text-white rounded-xl text-sm font-semibold hover:opacity-90 disabled:opacity-40 flex items-center gap-2 shrink-0 transition-opacity"
+          className="m-1.5 px-4 py-2 bg-primary text-white rounded-xl text-sm font-semibold hover:opacity-90 disabled:opacity-40 flex items-center gap-2 shrink-0 transition-opacity"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
           {busy ? "Analiz" : "Çek"}
@@ -399,7 +399,7 @@ export default function ExtractPanel({ onPlaceSaved }: ExtractPanelProps) {
               <button
                 onClick={() => handleSave()}
                 disabled={saving || !editName || !editLat || !editLng}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 gradient-primary text-white rounded-xl text-sm font-semibold hover:opacity-90 disabled:opacity-40 transition-opacity"
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white rounded-xl text-sm font-semibold hover:opacity-90 disabled:opacity-40 transition-opacity"
               >
                 {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                 {proposal.duplicate ? "Yine de yeni kayıt oluştur" : "Kaydet"}

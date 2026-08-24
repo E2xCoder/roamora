@@ -50,7 +50,7 @@ export default function AddPlaceModal({
       <div className="relative bg-card border border-card-border rounded-t-3xl md:rounded-3xl p-6 w-full max-w-md mx-0 md:mx-4 shadow-[var(--shadow-xl)] animate-slide-up">
         <div className="flex items-center justify-between mb-5">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl gradient-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-2xl bg-primary flex items-center justify-center">
               <MapPin size={18} className="text-white" />
             </div>
             <h2 className="text-base font-bold">Yeni Yer Ekle</h2>
@@ -134,7 +134,7 @@ export default function AddPlaceModal({
               <button
                 type="button"
                 onClick={addTag}
-                className="px-4 py-3 gradient-primary text-white rounded-2xl text-sm font-semibold"
+                className="px-4 py-3 bg-primary text-white rounded-2xl text-sm font-semibold"
               >
                 +
               </button>
@@ -164,7 +164,7 @@ export default function AddPlaceModal({
             </button>
             <button
               type="submit"
-              className="flex-1 px-4 py-3 gradient-primary text-white rounded-2xl text-sm font-semibold hover:opacity-90 transition-opacity"
+              className="flex-1 px-4 py-3 bg-primary text-white rounded-2xl text-sm font-semibold hover:opacity-90 transition-opacity"
             >
               Kaydet
             </button>

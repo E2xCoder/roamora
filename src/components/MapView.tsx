@@ -601,7 +601,7 @@ export default function MapView({
     return (
       <div className="w-full h-full bg-surface flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl gradient-primary flex items-center justify-center animate-pulse">
+          <div className="w-10 h-10 rounded-2xl bg-primary flex items-center justify-center animate-pulse">
             <span className="text-white font-bold">R</span>
           </div>
           <p className="text-muted text-sm">Harita yukleniyor...</p>

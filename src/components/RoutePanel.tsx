@@ -131,7 +131,7 @@ export default function RoutePanel({
   if (stops.length === 0) {
     return (
       <div className="p-6 text-center">
-        <div className="w-16 h-16 rounded-3xl gradient-warm flex items-center justify-center mx-auto mb-4">
+        <div className="w-16 h-16 rounded-3xl bg-accent flex items-center justify-center mx-auto mb-4">
           <RouteIcon size={26} className="text-white" />
         </div>
         <p className="font-semibold text-sm">Rota olustur</p>
@@ -212,7 +212,7 @@ export default function RoutePanel({
           className={`w-full flex items-center justify-center gap-2 py-3.5 text-sm font-semibold transition-all ${
             live
               ? "bg-danger text-white"
-              : "gradient-warm text-white hover:opacity-90"
+              : "bg-accent text-white hover:opacity-90"
           }`}
         >
           {live ? <Square size={14} /> : <Navigation size={14} />}
@@ -320,7 +320,7 @@ export default function RoutePanel({
               <button
                 onClick={onOptimize}
                 disabled={optimizing || !startLocation}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 gradient-primary text-white rounded-xl text-sm font-semibold disabled:opacity-40"
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white rounded-xl text-sm font-semibold disabled:opacity-40"
               >
                 {optimizing ? (
                   <Loader2 size={14} className="animate-spin" />

@@ -50,7 +50,7 @@ export default function LoginForm() {
     <div className="min-h-dvh flex items-center justify-center px-6">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="w-14 h-14 rounded-3xl gradient-primary flex items-center justify-center mx-auto mb-4">
+          <div className="w-14 h-14 rounded-3xl bg-primary flex items-center justify-center mx-auto mb-4">
             <span className="text-white font-bold text-xl">R</span>
           </div>
           <h1 className="text-xl font-bold">Roamora</h1>
@@ -86,7 +86,7 @@ export default function LoginForm() {
           <button
             type="submit"
             disabled={submitting || !password}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3.5 gradient-primary text-white rounded-2xl text-sm font-semibold hover:opacity-90 disabled:opacity-40 transition-opacity"
+            className="w-full flex items-center justify-center gap-2 px-4 py-3.5 bg-primary text-white rounded-2xl text-sm font-semibold hover:opacity-90 disabled:opacity-40 transition-opacity"
           >
             {submitting ? (
               <Loader2 size={16} className="animate-spin" />
