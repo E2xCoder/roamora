@@ -16,7 +16,21 @@ export async function GET(
     },
   });
   if (!trip) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json({ ...trip, preferences: JSON.parse(trip.preferences) });
+  return NextResponse.json({
+    ...trip,
+    preferences: JSON.parse(trip.preferences),
+    days: trip.days.map((d) => ({ ...d, research: safeParseObject(d.researchData) })),
+  });
+}
+
+function safeParseObject(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function DELETE(

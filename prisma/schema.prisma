@@ -341,6 +341,14 @@ model TripDay {
   tripId    String
   dayNumber Int
   date      String
+  /// Real per-day research summary from the autoplan() pipeline that created
+  /// this day (restaurant, hidden gems, weather, departure safety, budget,
+  /// conflicts) — JSON, additive to the phase-4 optimizer-output columns on
+  /// TripActivity below. Without this, revisiting a saved trip could only
+  /// ever show the bare stop list, not the real research behind it. Null for
+  /// a day created before this field existed, or via the older /api/trips
+  /// (ai-planner.ts) path, which has no equivalent research to store.
+  researchData String?
 
   trip       Trip           @relation(fields: [tripId], references: [id], onDelete: Cascade)
   activities TripActivity[]

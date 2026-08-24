@@ -1,33 +1,59 @@
 @import "tailwindcss";
 
+/*
+ * Design system v2 (product-level redesign — see git log for the audit that
+ * preceded it). Replaces the previous indigo/purple, gradient-heavy,
+ * dashboard-style palette with a calmer, warmer "modern travel app" system:
+ * one confident brand color (ink-teal) for structure/navigation/links, one
+ * warm accent (coral) reserved for the primary action, warm neutrals
+ * instead of slate/blue-grays so surfaces don't read as "admin panel".
+ * Gradients are now used sparingly (hero sections only, one gradient, not
+ * four different ones applied semi-randomly to cards).
+ */
+
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
+  --background: #faf9f7;
+  --foreground: #1c1917;
   --card: #ffffff;
-  --card-border: #e2e8f0;
-  --card-hover: #f1f5f9;
-  --primary: #6366f1;
-  --primary-hover: #4f46e5;
-  --primary-light: #eef2ff;
-  --primary-glow: rgba(99, 102, 241, 0.15);
-  --secondary: #f59e0b;
-  --secondary-light: #fef3c7;
-  --accent: #ec4899;
-  --accent-light: #fce7f3;
-  --muted: #94a3b8;
-  --muted-fg: #64748b;
-  --danger: #ef4444;
-  --success: #10b981;
-  --surface: #f1f5f9;
-  --glass: rgba(255, 255, 255, 0.8);
-  --glass-border: rgba(226, 232, 240, 0.6);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.08);
-  --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.1);
+  --card-border: #e7e4e1;
+  --card-hover: #f5f3f1;
+  --surface: #f2efec;
+
+  --primary: #0f6e6a;
+  --primary-hover: #0b5754;
+  --primary-light: #e3f1f0;
+  --primary-glow: rgba(15, 110, 106, 0.16);
+
+  --accent: #ec6a4f;
+  --accent-hover: #d8543a;
+  --accent-light: #fdeae5;
+  --accent-glow: rgba(236, 106, 79, 0.18);
+
+  --secondary: #b8893f;
+  --secondary-light: #f7ecd9;
+
+  --muted: #a8a29e;
+  --muted-fg: #78716c;
+
+  --danger: #dc4c3f;
+  --danger-light: #fbe7e4;
+  --warning: #b8893f;
+  --warning-light: #f7ecd9;
+  --success: #2f8f5b;
+  --success-light: #e5f3ea;
+
+  --glass: rgba(255, 255, 255, 0.82);
+  --glass-border: rgba(231, 228, 225, 0.7);
+
+  --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.05);
+  --shadow-md: 0 4px 16px rgba(28, 25, 23, 0.07);
+  --shadow-lg: 0 12px 32px rgba(28, 25, 23, 0.1);
+  --shadow-xl: 0 24px 64px rgba(28, 25, 23, 0.14);
+
   --radius: 16px;
   --radius-sm: 12px;
   --radius-xs: 8px;
+  --radius-lg: 24px;
 }
 
 @theme inline {
@@ -40,14 +66,20 @@
   --color-primary-hover: var(--primary-hover);
   --color-primary-light: var(--primary-light);
   --color-primary-glow: var(--primary-glow);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-light: var(--accent-light);
+  --color-accent-glow: var(--accent-glow);
   --color-secondary: var(--secondary);
   --color-secondary-light: var(--secondary-light);
-  --color-accent: var(--accent);
-  --color-accent-light: var(--accent-light);
   --color-muted: var(--muted);
   --color-muted-fg: var(--muted-fg);
   --color-danger: var(--danger);
+  --color-danger-light: var(--danger-light);
+  --color-warning: var(--warning);
+  --color-warning-light: var(--warning-light);
   --color-success: var(--success);
+  --color-success-light: var(--success-light);
   --color-surface: var(--surface);
   --color-glass: var(--glass);
   --color-glass-border: var(--glass-border);
@@ -55,27 +87,81 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* Automatic (prefers-color-scheme) dark mode — layered surfaces, no pure
+   black, no neon glow. A manual override class (`.dark`) applies the same
+   values so a future explicit toggle can reuse them without redefinition. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0b0f1a;
-    --foreground: #e2e8f0;
-    --card: #151b2e;
-    --card-border: #1e293b;
-    --card-hover: #1e293b;
-    --primary-light: #1e1b4b;
-    --primary-glow: rgba(99, 102, 241, 0.2);
-    --secondary-light: #451a03;
-    --accent-light: #500724;
-    --muted: #64748b;
-    --muted-fg: #94a3b8;
-    --surface: #0f172a;
-    --glass: rgba(15, 23, 42, 0.85);
-    --glass-border: rgba(30, 41, 59, 0.6);
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.4);
-    --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.5);
+  :root:not(.light) {
+    --background: #14120f;
+    --foreground: #f1efec;
+    --card: #1d1a17;
+    --card-border: #2c2825;
+    --card-hover: #262220;
+    --surface: #1a1714;
+
+    --primary: #4fb3ac;
+    --primary-hover: #6ec4bd;
+    --primary-light: #1a2f2c;
+    --primary-glow: rgba(79, 179, 172, 0.18);
+
+    --accent: #f0876c;
+    --accent-hover: #f39d85;
+    --accent-light: #3a241d;
+    --accent-glow: rgba(240, 135, 108, 0.2);
+
+    --secondary: #d8ad6c;
+    --secondary-light: #332a1a;
+
+    --muted: #6b6560;
+    --muted-fg: #a39c95;
+
+    --danger: #ec6a5c;
+    --danger-light: #3a1f1c;
+    --warning: #d8ad6c;
+    --warning-light: #332a1a;
+    --success: #56b884;
+    --success-light: #1a2e22;
+
+    --glass: rgba(20, 18, 15, 0.86);
+    --glass-border: rgba(44, 40, 37, 0.7);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
+    --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.55);
   }
+}
+.dark {
+  --background: #14120f;
+  --foreground: #f1efec;
+  --card: #1d1a17;
+  --card-border: #2c2825;
+  --card-hover: #262220;
+  --surface: #1a1714;
+  --primary: #4fb3ac;
+  --primary-hover: #6ec4bd;
+  --primary-light: #1a2f2c;
+  --primary-glow: rgba(79, 179, 172, 0.18);
+  --accent: #f0876c;
+  --accent-hover: #f39d85;
+  --accent-light: #3a241d;
+  --accent-glow: rgba(240, 135, 108, 0.2);
+  --secondary: #d8ad6c;
+  --secondary-light: #332a1a;
+  --muted: #6b6560;
+  --muted-fg: #a39c95;
+  --danger: #ec6a5c;
+  --danger-light: #3a1f1c;
+  --warning: #d8ad6c;
+  --warning-light: #332a1a;
+  --success: #56b884;
+  --success-light: #1a2e22;
+  --glass: rgba(20, 18, 15, 0.86);
+  --glass-border: rgba(44, 40, 37, 0.7);
+}
+
+* {
+  border-color: var(--card-border);
 }
 
 body {
@@ -88,6 +174,7 @@ body {
   height: 100%;
   width: 100%;
   border-radius: 0;
+  background: var(--surface);
 }
 
 .glass-panel {
@@ -97,20 +184,10 @@ body {
   border: 1px solid var(--glass-border);
 }
 
-.gradient-primary {
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
-}
-
-.gradient-warm {
-  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
-}
-
-.gradient-cool {
-  background: linear-gradient(135deg, #06b6d4 0%, #6366f1 100%);
-}
-
-.gradient-nature {
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+/* One brand gradient, used sparingly (hero surfaces only) — not a family of
+   four gradients applied to arbitrary cards/badges/buttons. */
+.gradient-brand {
+  background: linear-gradient(135deg, var(--primary) 0%, #14807a 55%, var(--accent) 130%);
 }
 
 .hide-scrollbar {
@@ -136,6 +213,11 @@ body {
   50% { box-shadow: 0 0 0 8px transparent; }
 }
 
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
 .animate-slide-up {
   animation: slide-up 0.3s ease-out;
 }
@@ -146,4 +228,26 @@ body {
 
 .animate-pulse-glow {
   animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--surface) 0%, var(--card-hover) 50%, var(--surface) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Focus visibility — keyboard users get a real ring everywhere; mouse users don't. */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }
