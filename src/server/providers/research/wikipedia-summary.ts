@@ -1,11 +1,11 @@
 import "server-only";
 import { prisma } from "@/lib/db";
-import { haversine } from "@/lib/place-meta";
 import {
   wikipediaFetch,
   wikiPagesOf,
   isWikiPlaceArticle,
   wikiTitlesRelated,
+  type WikiPage,
 } from "@/server/providers/wikipedia-client";
 
 /**
@@ -29,6 +29,19 @@ export type SummaryLookup =
   | { status: "none" }
   | { status: "unavailable"; reason: string };
 
+/**
+ * Entity identity, not geographic proximity, is what makes a summary true of
+ * a place. A nearby-but-unrelated article (e.g. a museum two doors down from
+ * a bar with no Wikipedia page of its own) used to be accepted as a "close
+ * enough" fallback — that is exactly how a bar ends up describing itself
+ * with a museum's history. No name match means no description, never a
+ * plausible-looking wrong one. Exported as its own pure function so this
+ * exact regression stays covered by a real, network-free unit test.
+ */
+export function selectNamedPage(pages: WikiPage[], name: string): WikiPage | null {
+  return pages.find((p) => wikiTitlesRelated(p.title, name)) ?? null;
+}
+
 async function fetchSummary(name: string, lat: number, lng: number): Promise<PlaceSummary | null> {
   const payload = await wikipediaFetch({
     action: "query",
@@ -47,24 +60,13 @@ async function fetchSummary(name: string, lat: number, lng: number): Promise<Pla
   );
   if (pages.length === 0) return null;
 
-  const named = pages.find((p) => wikiTitlesRelated(p.title, name));
-  const chosen =
-    named ??
-    pages
-      .filter((p) => p.coordinates?.[0])
-      .map((p) => ({
-        page: p,
-        distance: haversine({ lat, lng }, { lat: p.coordinates![0].lat, lng: p.coordinates![0].lon }),
-      }))
-      .filter((p) => p.distance <= 300) // tighter radius than images: a wrong summary is worse than a wrong photo
-      .sort((a, b) => a.distance - b.distance)[0]?.page;
-
-  if (!chosen?.extract) return null;
+  const named = selectNamedPage(pages, name);
+  if (!named?.extract) return null;
 
   return {
-    text: chosen.extract.trim(),
-    pageTitle: chosen.title,
-    pageUrl: `https://en.wikipedia.org/wiki/${encodeURIComponent(chosen.title.replace(/ /g, "_"))}`,
+    text: named.extract.trim(),
+    pageTitle: named.title,
+    pageUrl: `https://en.wikipedia.org/wiki/${encodeURIComponent(named.title.replace(/ /g, "_"))}`,
   };
 }
 

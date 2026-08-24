@@ -1,7 +1,7 @@
 import "server-only";
 import { geocodeOnce } from "@/server/services/geocode";
 import { overpassDiscovery } from "@/server/providers/discovery/overpass-discovery";
-import { scoreCandidates, pruneAndDiversify } from "@/server/services/discovery-scoring";
+import { scoreCandidates, pruneAndDiversify, isSightseeingCandidate } from "@/server/services/discovery-scoring";
 import { resolveOpeningHoursForDate, widestWindow } from "@/lib/opening-hours";
 import { findPlaceSummary } from "@/server/providers/research/wikipedia-summary";
 import { searxngProvider, SearchUnavailableError } from "@/server/providers/research/searxng";
@@ -146,6 +146,10 @@ export interface StopProvenance {
   summarySource: "wikipedia" | "none";
   summaryText?: string;
   summaryUrl?: string;
+  /** The same real facts already used to schedule this stop (StopInput's estimatedCost/earliestTime/latestTime) — carried here too so a UI card can show "why this place was scheduled" without cross-referencing the raw itinerary stop by id. */
+  estimatedCost?: number;
+  earliestTime?: string;
+  latestTime?: string;
 }
 
 export interface ResearchTraceEntry {
@@ -190,6 +194,9 @@ export interface HiddenGemFound {
   category: string;
   distanceMeters: number;
   radiusTierMeters: number;
+  /** Real, entity-matched Wikipedia summary (same lookup a regular stop gets) — undefined, never fabricated, when no article names this exact place. */
+  description?: string;
+  sourceUrl?: string;
 }
 
 export interface HiddenGemResult {
@@ -436,7 +443,12 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
   // BEFORE the shortlist is built, on top of whatever the user's own
   // stated interests already weighted — see weather-routing.ts.
   const weights = applyWeatherWeights(baseWeights, [...new Set(scored.map((c) => c.category))], weather.badWeatherDay);
-  const shortlist = pruneAndDiversify(scored, maxStops * SHORTLIST_MULTIPLIER, weights);
+  // Hotels, hostels and transport hubs are real, well-mapped OSM places but
+  // never sightseeing on their own — without this, a notable-looking hotel
+  // (a real bug seen live: "Hotel Paříž" scheduled as a scored stop with its
+  // own visit window) competes for a shortlist slot the same as a museum.
+  const sightseeingPool = scored.filter((c) => isSightseeingCandidate(c, req.mustSeeNames));
+  const shortlist = pruneAndDiversify(sightseeingPool, maxStops * SHORTLIST_MULTIPLIER, weights);
   // Every OSM restaurant candidate, not just the ones that made the general
   // attraction shortlist — pruneAndDiversify's category round-robin can
   // easily leave real restaurant candidates out entirely when interests skew
@@ -699,6 +711,9 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       summarySource,
       summaryText,
       summaryUrl,
+      estimatedCost,
+      earliestTime,
+      latestTime,
     });
   }
 
@@ -1130,6 +1145,23 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       }
       if (excludedAsClosed) continue; // a real gem we know is shut that day is not scheduled
 
+      // Same real, entity-matched "why visit this" text as a regular stop —
+      // a hidden gem with no description of its own beyond "300m off route"
+      // gives the traveller no reason to actually take the detour.
+      let gemSummarySource: StopProvenance["summarySource"] = "none";
+      let gemSummaryText: string | undefined;
+      let gemSummaryUrl: string | undefined;
+      try {
+        const summary = await findPlaceSummary(p.name, p.lat, p.lng);
+        if (summary.status === "found") {
+          gemSummarySource = "wikipedia";
+          gemSummaryText = summary.summary.text;
+          gemSummaryUrl = summary.summary.pageUrl;
+        }
+      } catch {
+        // Non-critical — the gem still gets its category/distance either way.
+      }
+
       finalStops.push({
         input: {
           id: p.id,
@@ -1151,7 +1183,12 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
         openingHoursConfidence: osmHours && earliestTime ? "high" : "unknown",
         priceSource: "unverified",
         priceConfidence: "unknown",
-        summarySource: "none",
+        summarySource: gemSummarySource,
+        summaryText: gemSummaryText,
+        summaryUrl: gemSummaryUrl,
+        estimatedCost: p.tags.fee === "no" ? 0 : undefined,
+        earliestTime,
+        latestTime,
       });
       addedGems.push({
         stopId: p.id,
@@ -1159,6 +1196,8 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
         category: finding.candidate.category,
         distanceMeters: Math.round(finding.distanceMeters),
         radiusTierMeters: finding.radiusTierMeters,
+        description: gemSummaryText,
+        sourceUrl: gemSummaryUrl,
       });
     }
 

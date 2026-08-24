@@ -63,6 +63,10 @@ export interface ScheduledStop {
   visitMinutes: number;
   travelFromPrevMeters: number;
   travelFromPrevSeconds: number;
+  /** Passthrough of the matching StopInput's own fields — display-only, never used by the solver itself (which already consumed them as constraints upstream of this output). */
+  estimatedCost?: number;
+  earliestTime?: string;
+  latestTime?: string;
 }
 
 export interface Conflict {
@@ -277,6 +281,9 @@ export function optimizeItinerary(
       visitMinutes: s.visitMinutes,
       travelFromPrevMeters: s.travelFromPrevMeters,
       travelFromPrevSeconds: s.travelFromPrevSeconds,
+      estimatedCost: placed.get(s.matrixIndex)!.estimatedCost,
+      earliestTime: placed.get(s.matrixIndex)!.earliestTime,
+      latestTime: placed.get(s.matrixIndex)!.latestTime,
     })),
     conflicts,
     totalDistanceMeters,

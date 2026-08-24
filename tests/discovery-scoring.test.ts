@@ -3,6 +3,7 @@ import {
   classifyOsmPlace,
   scoreCandidates,
   pruneAndDiversify,
+  isSightseeingCandidate,
   type ScoredCandidate,
 } from "@/server/services/discovery-scoring";
 import type { DiscoveredPlace } from "@/server/providers/discovery/types";
@@ -116,5 +117,31 @@ describe("pruneAndDiversify", () => {
     // With a strong museum weight, both top picks should be museums even
     // though categories are round-robined by default.
     expect(weighted.every((r) => r.category === "museum")).toBe(true);
+  });
+});
+
+describe("isSightseeingCandidate", () => {
+  function candidate(category: string, name = "Test Place"): ScoredCandidate {
+    return { place: place({ name }), category, notabilityScore: 5, distanceFromCenterMeters: 100 };
+  }
+
+  it("rejects a hotel from the general sightseeing shortlist", () => {
+    // Real regression: "Hotel Paříž" was scheduled as a scored stop with
+    // its own visit window purely because it had good OSM notability tags.
+    expect(isSightseeingCandidate(candidate("accommodation", "Hotel Paříž"))).toBe(false);
+  });
+
+  it("rejects a transport hub from the general sightseeing shortlist", () => {
+    expect(isSightseeingCandidate(candidate("transport", "Praha hlavní nádraží"))).toBe(false);
+  });
+
+  it("keeps a real sightseeing category unaffected", () => {
+    expect(isSightseeingCandidate(candidate("museum"))).toBe(true);
+  });
+
+  it("allows a non-sightseeing place through only when explicitly requested by name", () => {
+    const hotel = candidate("accommodation", "Hotel Paříž");
+    expect(isSightseeingCandidate(hotel, ["Hotel Paříž"])).toBe(true);
+    expect(isSightseeingCandidate(hotel, ["some other hotel"])).toBe(false);
   });
 });

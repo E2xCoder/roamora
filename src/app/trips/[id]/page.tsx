@@ -253,6 +253,35 @@ function matchCategory(research: DayResearchSummary | null, placeName: string): 
   return "attraction";
 }
 
+/** Compact, honest "why this place was scheduled" facts — real confidence, never a fabricated fact when unverified (spec: unknown is acceptable, wrong is not). */
+function AttractionFacts({ provenance }: { provenance: DayResearchSummary["provenance"][number] | undefined }) {
+  if (!provenance) return null;
+
+  const priceLabel =
+    provenance.estimatedCost == null
+      ? null
+      : provenance.estimatedCost === 0
+        ? "Ücretsiz"
+        : `~${provenance.estimatedCost}${provenance.priceType === "reduced" ? " (indirimli)" : provenance.priceType === "minimum" ? "+ (başlangıç fiyatı)" : ""}`;
+
+  const hoursVerified = provenance.openingHoursSource !== "unverified";
+  const hoursLabel = hoursVerified
+    ? provenance.latestTime
+      ? `${provenance.latestTime}'e kadar açık`
+      : "Açılış saati doğrulandı"
+    : "Açılış saati doğrulanamadı";
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap mt-1.5 text-[11px]">
+      <span className={hoursVerified ? "text-success" : "text-muted"}>{hoursLabel}</span>
+      {priceLabel && <span className="text-muted-fg">· {priceLabel}</span>}
+      {provenance.sourceType === "official" && provenance.officialDomain && (
+        <span className="text-muted">· Kaynak: {provenance.officialDomain}</span>
+      )}
+    </div>
+  );
+}
+
 interface ActivityLike {
   id: string; placeName: string; lat: number; lng: number; timeSlot: string; notes: string;
   arrivalTime?: string | null; departureTime?: string | null; travelSeconds?: number | null; travelMeters?: number | null;
@@ -265,6 +294,7 @@ function TimelineItem({
   const hiddenGem = research?.hiddenGems?.found.find((g) => g.name === activity.placeName);
   const fixedEvent = research?.events?.find((e) => e.status === "scheduled" && e.eventName === activity.placeName);
   const restaurant = isRestaurant ? research?.restaurant?.selected : undefined;
+  const provenance = research?.provenance?.find((p) => p.name === activity.placeName);
 
   return (
     <button onClick={onSelect} className="w-full text-left">
@@ -292,11 +322,21 @@ function TimelineItem({
             {isRestaurant && restaurant ? (
               <RestaurantDetail restaurant={restaurant} />
             ) : hiddenGem ? (
-              <p className="text-xs text-muted-fg mt-1">
-                Rotadan {Math.round(hiddenGem.distanceMeters)} m sapma — {hiddenGem.category}
-              </p>
+              <div className="mt-1 space-y-1">
+                {hiddenGem.description ? (
+                  <p className="text-xs text-muted-fg line-clamp-2">{hiddenGem.description}</p>
+                ) : (
+                  <p className="text-xs text-muted italic">Bu yer için doğrulanmış bir açıklama bulunamadı</p>
+                )}
+                <p className="text-[11px] text-muted">
+                  Rotadan {Math.round(hiddenGem.distanceMeters)} m sapma — {hiddenGem.category}
+                </p>
+              </div>
             ) : (
-              activity.notes && <p className="text-xs text-muted-fg mt-1.5 line-clamp-2">{activity.notes}</p>
+              <>
+                {activity.notes && <p className="text-xs text-muted-fg mt-1.5 line-clamp-2">{activity.notes}</p>}
+                <AttractionFacts provenance={provenance} />
+              </>
             )}
 
             {activity.travelSeconds != null && activity.travelSeconds > 0 && (

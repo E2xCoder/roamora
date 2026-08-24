@@ -36,10 +36,15 @@ export interface StopProvenance {
   openingHoursConfidence: "high" | "medium" | "low" | "unknown";
   priceSource: "web-research" | "unverified";
   priceConfidence: "high" | "medium" | "low" | "unknown";
+  priceType?: "standard" | "minimum" | "reduced";
   sourceType?: "official" | "secondary" | "unverified";
+  officialDomain?: string;
   summarySource: "wikipedia" | "none";
   summaryText?: string;
   summaryUrl?: string;
+  estimatedCost?: number;
+  earliestTime?: string;
+  latestTime?: string;
 }
 
 export interface MenuItemResult {
@@ -83,6 +88,8 @@ export interface HiddenGemFound {
   name: string;
   category: string;
   distanceMeters: number;
+  description?: string;
+  sourceUrl?: string;
 }
 
 export interface WeatherForecast {
@@ -271,6 +278,8 @@ export interface DayResearchSummary {
   /** The user's own requested budget for this day, if any — carried alongside totalCost so a revisited trip can still show Budget / Expected / Remaining, not just the expected side. */
   requestedBudget?: number;
   currency?: string;
+  /** Per-stop opening-hours/price/source facts — kept alongside the itinerary so a revisited trip can still show "why this place was scheduled", not just its name and time slot. Matched to a TripActivity by name (TripActivity has no persisted stopId). */
+  provenance: StopProvenance[];
 }
 
 export function toDayResearchSummary(result: AutoplanResult, requestedBudget?: number, currency?: string): DayResearchSummary {
@@ -288,6 +297,7 @@ export function toDayResearchSummary(result: AutoplanResult, requestedBudget?: n
     events: result.events,
     requestedBudget,
     currency,
+    provenance: result.provenance,
   };
 }
 

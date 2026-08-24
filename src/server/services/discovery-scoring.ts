@@ -47,6 +47,24 @@ export function classifyOsmPlace(osmTag: string, osmValue: string): string {
   return match?.category ?? "attraction";
 }
 
+/**
+ * Categories that are real, well-mapped OSM places but never sightseeing —
+ * a hotel scoring well on notability tags used to win a shortlist slot the
+ * same way a museum would and get scheduled as a stop with its own visit
+ * window. `mustSeeNames` is the one legitimate way a caller can still ask
+ * for one by name (spec: "only show it as a stop if explicitly asked for").
+ */
+export const NON_SIGHTSEEING_CATEGORIES = new Set(["accommodation", "transport"]);
+
+export function isSightseeingCandidate(
+  candidate: Pick<ScoredCandidate, "category" | "place">,
+  mustSeeNames: string[] = []
+): boolean {
+  if (!NON_SIGHTSEEING_CATEGORIES.has(candidate.category)) return true;
+  const name = candidate.place.name?.toLowerCase() ?? "";
+  return mustSeeNames.some((n) => name.includes(n.toLowerCase()));
+}
+
 export interface ScoredCandidate {
   place: DiscoveredPlace;
   category: string;
