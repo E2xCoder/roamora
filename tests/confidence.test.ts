@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scoreConfidence, isOfficialSource, detectStaleness, selectBestResult, hasNameRelevance } from "@/server/services/confidence";
+import { scoreConfidence, isOfficialSource, isNonOfficialPlatform, detectStaleness, selectBestResult, hasNameRelevance } from "@/server/services/confidence";
 import type { WebSearchResult } from "@/server/providers/research/types";
 
 describe("scoreConfidence", () => {
@@ -161,6 +161,39 @@ describe("isOfficialSource", () => {
 
   it("returns false for a malformed URL rather than throwing", () => {
     expect(isOfficialSource("not a url", "Rijksmuseum Official", "Rijksmuseum")).toBe(false);
+  });
+
+  it(
+    "real regression: a restaurant's own Instagram profile must never be treated as its " +
+      'official site (live-observed real OSM `website` tag: a Prague restaurant\'s value was ' +
+      "a bare Instagram profile URL) — social platforms are rejected before the slug/title " +
+      "checks run at all, since a profile handle can otherwise slug-match a short place name",
+    () => {
+      expect(
+        isOfficialSource("https://www.instagram.com/ygf.malatang_cz/", "Yangguofu Malatang (@ygf.malatang_cz)", "Yangguofu Malatang")
+      ).toBe(false);
+    }
+  );
+});
+
+describe("isNonOfficialPlatform", () => {
+  it("flags known social-media and delivery-app domains", () => {
+    expect(isNonOfficialPlatform("https://www.instagram.com/somerestaurant/")).toBe(true);
+    expect(isNonOfficialPlatform("https://www.facebook.com/somerestaurant/")).toBe(true);
+    expect(isNonOfficialPlatform("https://wolt.com/en/cze/prague/restaurant/somerestaurant")).toBe(true);
+    expect(isNonOfficialPlatform("https://www.tripadvisor.com/Restaurant_Review-xyz.html")).toBe(true);
+  });
+
+  it("does not flag a real independent domain", () => {
+    expect(isNonOfficialPlatform("https://www.borchardt-restaurant.de/")).toBe(false);
+  });
+
+  it("matches a subdomain of a known platform, not just the bare domain", () => {
+    expect(isNonOfficialPlatform("https://business.facebook.com/somerestaurant/")).toBe(true);
+  });
+
+  it("returns false for a malformed URL rather than throwing", () => {
+    expect(isNonOfficialPlatform("not a url")).toBe(false);
   });
 });
 

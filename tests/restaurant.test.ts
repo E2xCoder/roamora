@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { mealWindowsFor, restaurantStopInput, type RestaurantCandidateResult } from "@/server/services/restaurant";
+import {
+  mealWindowsFor,
+  restaurantStopInput,
+  researchRestaurant,
+  preScoreRestaurantCandidate,
+  type RestaurantCandidateResult,
+  type RestaurantResearchParams,
+} from "@/server/services/restaurant";
+import type { ScoredCandidate } from "@/server/services/discovery-scoring";
+import type { DiscoveredPlace } from "@/server/providers/discovery/types";
 
 describe("mealWindowsFor", () => {
   it("includes lunch when the trip's active hours cover it", () => {
@@ -84,5 +93,125 @@ describe("restaurantStopInput", () => {
     const stop = restaurantStopInput(candidate());
     expect(stop.fixedTime).toBeUndefined();
     expect(stop.locked).toBeUndefined();
+  });
+});
+
+// Real reference point (Prague Old Town Square), used with small lat/lng
+// offsets to get real, deterministic haversine distances without needing a
+// route geometry — researchRestaurant only needs routeReferencePoint.
+const REF = { lat: 50.087, lng: 14.4213 };
+
+function place(overrides: Partial<DiscoveredPlace> = {}): DiscoveredPlace {
+  return {
+    id: `osm:node:${Math.random()}`,
+    name: "Test Restaurant",
+    lat: REF.lat,
+    lng: REF.lng,
+    osmTag: "amenity",
+    osmValue: "restaurant",
+    tags: {},
+    source: "osm",
+    ...overrides,
+  };
+}
+
+function candidate(overrides: Partial<DiscoveredPlace> = {}, notabilityScore = 0): ScoredCandidate {
+  const p = place(overrides);
+  return { place: p, category: "restaurant", notabilityScore, distanceFromCenterMeters: 0 };
+}
+
+function baseParams(overrides: Partial<RestaurantResearchParams> = {}): RestaurantResearchParams {
+  return {
+    restaurantCandidates: [],
+    destination: "Prague",
+    tripDate: new Date("2026-09-29T12:00:00"),
+    routeReferencePoint: REF,
+    arrivalTime: "09:00",
+    dayEnd: "21:00",
+    searchAvailable: false,
+    aiAvailable: false,
+    ...overrides,
+  };
+}
+
+/** Offsets a lat/lng roughly `meters` east of REF — small enough that a flat approximation is accurate at this scale. */
+function offsetMeters(meters: number): { lat: number; lng: number } {
+  return { lat: REF.lat, lng: REF.lng + meters / (111_320 * Math.cos((REF.lat * Math.PI) / 180)) };
+}
+
+describe("researchRestaurant", () => {
+  it("returns no-meal-window when the trip's active hours never reach lunch or dinner", async () => {
+    const result = await researchRestaurant(
+      baseParams({ arrivalTime: "08:00", dayEnd: "11:00", restaurantCandidates: [candidate()] })
+    );
+    expect(result.status).toBe("no-meal-window");
+  });
+
+  it("returns no-candidates when OSM found no restaurants at all", async () => {
+    const result = await researchRestaurant(baseParams({ restaurantCandidates: [] }));
+    expect(result.status).toBe("no-candidates");
+  });
+
+  it("excludes a candidate confirmed closed on the actual trip date (OSM hours), never scheduling it", async () => {
+    const closedOnMonday = candidate({ name: "Monday Closed", tags: { opening_hours: "Tu-Su 12:00-22:00" } });
+    // 2026-09-29 is a Tuesday — pick a date that's actually a Monday to hit the closure.
+    const result = await researchRestaurant(
+      baseParams({ tripDate: new Date("2026-09-28T12:00:00"), restaurantCandidates: [closedOnMonday] })
+    );
+    expect(result.status).toBe("no-suitable-candidate");
+  });
+
+  it("selects the OSM-verified-open candidate over one with no opening-hours data at all, all else equal", async () => {
+    const verified = candidate({ name: "Verified Open", tags: { opening_hours: "Mo-Su 11:00-23:00" } });
+    const unverified = candidate({ name: "Unknown Hours" });
+    const result = await researchRestaurant(baseParams({ restaurantCandidates: [unverified, verified] }));
+    expect(result.status).toBe("scheduled");
+    expect(result.selected?.name).toBe("Verified Open");
+    expect(result.selected?.openingHoursSource).toBe("osm");
+  });
+
+  it("never fabricates menu items or a price when search/AI are unavailable — reports honestly instead", async () => {
+    const c = candidate({ name: "No Research", tags: { opening_hours: "Mo-Su 11:00-23:00" } });
+    const result = await researchRestaurant(baseParams({ restaurantCandidates: [c], searchAvailable: false, aiAvailable: false }));
+    expect(result.selected?.menuItems).toEqual([]);
+    expect(result.selected?.menuAvailability.status).toBe("no-source");
+    expect(result.selected?.estimatedMealCost).toBeUndefined();
+  });
+
+  it(
+    "real-world regression coverage: a highly notable restaurant a few hundred metres " +
+      "further away is still considered, not excluded purely by an 8-nearest cutoff — a " +
+      "dense old-town block easily has 8+ closer, unremarkable restaurants that would " +
+      "otherwise always crowd out a genuinely better one slightly farther off",
+    async () => {
+      const nearbyButUnremarkable = Array.from({ length: 8 }, (_, i) =>
+        candidate({ name: `Nearby ${i}`, ...offsetMeters(20 + i * 5) }, 0)
+      );
+      const notableButFarther = candidate({ name: "Notable Farther", ...offsetMeters(400) }, 5);
+      const result = await researchRestaurant(
+        baseParams({ restaurantCandidates: [...nearbyButUnremarkable, notableButFarther] })
+      );
+      expect(result.considered.some((c) => c.name === "Notable Farther")).toBe(true);
+    }
+  );
+});
+
+describe("preScoreRestaurantCandidate", () => {
+  it("prefers a closer candidate when notability and cuisine fit are equal", () => {
+    const near = preScoreRestaurantCandidate(candidate({}, 0), 50);
+    const far = preScoreRestaurantCandidate(candidate({}, 0), 800);
+    expect(near).toBeGreaterThan(far);
+  });
+
+  it("lets a much more notable candidate outscore a slightly closer, unremarkable one", () => {
+    const closeButPlain = preScoreRestaurantCandidate(candidate({}, 0), 50);
+    const fartherButNotable = preScoreRestaurantCandidate(candidate({}, 5), 250);
+    expect(fartherButNotable).toBeGreaterThan(closeButPlain);
+  });
+
+  it("rewards a candidate whose OSM cuisine tag matches a stated food preference", () => {
+    const matching = preScoreRestaurantCandidate(candidate({ tags: { cuisine: "korean" } }, 0), 100, ["korean bbq"]);
+    const nonMatching = preScoreRestaurantCandidate(candidate({ tags: { cuisine: "italian" } }, 0), 100, ["korean bbq"]);
+    expect(matching).toBeGreaterThan(nonMatching);
   });
 });

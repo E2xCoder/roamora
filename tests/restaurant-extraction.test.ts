@@ -77,4 +77,34 @@ describe("extractJsonLdMenuItems", () => {
     </script>`;
     expect(extractJsonLdMenuItems(html)).toEqual([]);
   });
+
+  it("extracts items when the JSON-LD Restaurant node's own name matches the candidate", () => {
+    const html = `<script type="application/ld+json">
+      { "@type": "Restaurant", "name": "Test Trattoria", "hasMenu": { "@type": "Menu",
+        "hasMenuItem": [{ "@type": "MenuItem", "name": "Spaghetti Carbonara", "offers": { "price": 12 } }] } }
+    </script>`;
+    expect(extractJsonLdMenuItems(html, "Test Trattoria").map((i) => i.name)).toEqual(["Spaghetti Carbonara"]);
+  });
+
+  it(
+    "rejects a page's JSON-LD when its Restaurant node names a different business than the " +
+      "candidate this menu was fetched for — real risk: a directory/aggregator page, or a " +
+      "multi-location chain's page for a different branch, embedding structured data for " +
+      "the wrong entity entirely",
+    () => {
+      const html = `<script type="application/ld+json">
+        { "@type": "Restaurant", "name": "Some Other Restaurant Entirely", "hasMenu": { "@type": "Menu",
+          "hasMenuItem": [{ "@type": "MenuItem", "name": "Spaghetti Carbonara", "offers": { "price": 12 } }] } }
+      </script>`;
+      expect(extractJsonLdMenuItems(html, "Test Trattoria")).toEqual([]);
+    }
+  );
+
+  it("does not reject when the Restaurant node states no name at all (most Menu-only JSON-LD omits it)", () => {
+    const html = `<script type="application/ld+json">
+      { "@type": "Restaurant", "hasMenu": { "@type": "Menu",
+        "hasMenuItem": [{ "@type": "MenuItem", "name": "Espresso", "offers": { "price": 3 } }] } }
+    </script>`;
+    expect(extractJsonLdMenuItems(html, "Test Trattoria").map((i) => i.name)).toEqual(["Espresso"]);
+  });
 });

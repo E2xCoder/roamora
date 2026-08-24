@@ -80,6 +80,37 @@ const THIRD_PARTY_HOSTNAME_MARKERS = [
 ];
 
 /**
+ * Social-media, delivery-app and review-aggregator domains — never a
+ * place's own independent site, even when a structured source (an OSM
+ * `website` tag or a Wikidata P856 claim) names one directly. Real, live
+ * case: an OSM `website` tag pointing straight to an Instagram profile
+ * (~2% of real Prague food-venue website tags checked this way) — those
+ * two structured-data tiers used to skip this check entirely, since it
+ * previously lived only inside `isOfficialSource`, which they never called.
+ * A social/delivery page being fetched as "official, high confidence" is
+ * worse than one being skipped: it mislabels a third-party listing as the
+ * restaurant's own verified source, and typically yields nothing real
+ * anyway (these are near-universally JS-rendered shells to a static fetch).
+ */
+const NON_OFFICIAL_PLATFORM_HOSTNAMES = [
+  "facebook.com", "instagram.com", "twitter.com", "x.com", "threads.net", "linktr.ee",
+  "wolt.com", "ubereats.com", "deliveroo.com", "glovoapp.com", "foodora.com", "bolt.eu",
+  "foursquare.com", "google.com", "maps.app.goo.gl", "zomato.com", "thefork.com", "resy.com",
+  "tripadvisor.com", "yelp.com", "opentable.com",
+];
+
+/** True when `url`'s hostname is a known social/delivery/aggregator platform — never an independent official site, regardless of which tier resolved it. */
+export function isNonOfficialPlatform(url: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return false;
+  }
+  return NON_OFFICIAL_PLATFORM_HOSTNAMES.some((h) => hostname === h || hostname.endsWith(`.${h}`));
+}
+
+/**
  * Best-effort, deliberately conservative "is this the place's own site"
  * heuristic. False negatives (missing a real official site, e.g. a national
  * museum's own domain not sharing a slug with one specific gallery's name)
@@ -87,6 +118,8 @@ const THIRD_PARTY_HOSTNAME_MARKERS = [
  * overclaiming "official" inflates confidence a user might actually rely on.
  */
 export function isOfficialSource(url: string, resultTitle: string, placeName: string): boolean {
+  if (isNonOfficialPlatform(url)) return false;
+
   let hostname: string;
   try {
     hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");

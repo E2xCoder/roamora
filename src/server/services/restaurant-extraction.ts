@@ -53,6 +53,21 @@ function asNodeArray(value: unknown): JsonLdNode[] {
   return [];
 }
 
+/** Loose containment check, same discipline as wikipedia-client.ts's wikiTitlesRelated — a real menu page's JSON-LD Restaurant name should relate to the candidate it was fetched for, not just happen to be reachable from the same URL. */
+function entityNameRelated(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
 function offerPrice(node: JsonLdNode): { price: number | null; currency: string | null } {
   const offersRaw = node.offers;
   const offer = asNodeArray(offersRaw)[0];
@@ -75,24 +90,32 @@ function offerPrice(node: JsonLdNode): { price: number | null; currency: string 
  * sections) -> MenuItem.offers.price, depth-bounded against pathological
  * nesting in untrusted third-party markup.
  */
-function collectMenuItems(node: JsonLdNode, category: string, depth: number, out: ExtractedMenuItem[]): void {
+function collectMenuItems(node: JsonLdNode, category: string, depth: number, out: ExtractedMenuItem[], placeName?: string): void {
   if (depth > MAX_JSON_LD_DEPTH || out.length >= MAX_JSON_LD_ITEMS) return;
   const types = jsonLdTypes(node);
 
   if (types.includes("Restaurant") || types.includes("FoodEstablishment")) {
-    for (const menu of asNodeArray(node.hasMenu)) collectMenuItems(menu, category, depth + 1, out);
+    // A page can legitimately embed structured data for a business other
+    // than the one it was fetched for (a directory/aggregator page, or a
+    // multi-location chain's page for a different branch) — when the node
+    // itself states a name, it must actually relate to the candidate this
+    // menu is being attributed to. No name on the node at all is not
+    // treated as a mismatch (most real Menu-only JSON-LD omits it).
+    const nodeName = typeof node.name === "string" ? node.name : undefined;
+    if (placeName && nodeName && !entityNameRelated(nodeName, placeName)) return;
+    for (const menu of asNodeArray(node.hasMenu)) collectMenuItems(menu, category, depth + 1, out, placeName);
     return;
   }
   if (types.includes("Menu")) {
     const menuName = typeof node.name === "string" ? node.name : category;
-    for (const section of asNodeArray(node.hasMenuSection)) collectMenuItems(section, menuName, depth + 1, out);
-    for (const item of asNodeArray(node.hasMenuItem)) collectMenuItems(item, menuName, depth + 1, out);
+    for (const section of asNodeArray(node.hasMenuSection)) collectMenuItems(section, menuName, depth + 1, out, placeName);
+    for (const item of asNodeArray(node.hasMenuItem)) collectMenuItems(item, menuName, depth + 1, out, placeName);
     return;
   }
   if (types.includes("MenuSection")) {
     const sectionName = typeof node.name === "string" ? node.name : category;
-    for (const section of asNodeArray(node.hasMenuSection)) collectMenuItems(section, sectionName, depth + 1, out);
-    for (const item of asNodeArray(node.hasMenuItem)) collectMenuItems(item, sectionName, depth + 1, out);
+    for (const section of asNodeArray(node.hasMenuSection)) collectMenuItems(section, sectionName, depth + 1, out, placeName);
+    for (const item of asNodeArray(node.hasMenuItem)) collectMenuItems(item, sectionName, depth + 1, out, placeName);
     return;
   }
   if (types.includes("MenuItem")) {
@@ -123,7 +146,7 @@ function collectMenuItems(node: JsonLdNode, category: string, depth: number, out
  * malformed JSON or carries no Menu-shaped data — a page with no JSON-LD is
  * simply not a JSON-LD source, not an error.
  */
-export function extractJsonLdMenuItems(html: string): ExtractedMenuItem[] {
+export function extractJsonLdMenuItems(html: string, placeName?: string): ExtractedMenuItem[] {
   const items: ExtractedMenuItem[] = [];
   const scriptRe = /<script[^>]+type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let match: RegExpExecArray | null;
@@ -141,7 +164,7 @@ export function extractJsonLdMenuItems(html: string): ExtractedMenuItem[] {
     // reached the @graph branch for the common `{ "@graph": [...] }` shape.
     const graph = !Array.isArray(parsed) && parsed && typeof parsed === "object" ? (parsed as JsonLdNode)["@graph"] : undefined;
     const topNodes = graph !== undefined ? asNodeArray(graph) : asNodeArray(parsed);
-    for (const node of topNodes) collectMenuItems(node, "Menu", 0, items);
+    for (const node of topNodes) collectMenuItems(node, "Menu", 0, items, placeName);
   }
   return items;
 }

@@ -1,6 +1,6 @@
 import "server-only";
 import { searxngProvider, SearchUnavailableError } from "@/server/providers/research/searxng";
-import { isOfficialSource, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
+import { isOfficialSource, isNonOfficialPlatform, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
 import { getCached } from "@/server/services/research-cache";
 
 /**
@@ -99,8 +99,15 @@ export async function resolveOfficialSource(
 
   return getCached(NAMESPACE, key, TTL_MS, async () => {
     // --- 1. OSM website/contact tags — community-maintained structured data.
+    // Trusted as "official" without the web-search tier's name/relevance
+    // checks below, but NOT without this one: a community-entered `website`
+    // tag routinely points at the place's Instagram/Facebook profile or a
+    // delivery-app listing instead of an independent site (real, live case:
+    // an OSM restaurant node's `website` tag was a bare Instagram profile
+    // URL) — accepting that as "official, high confidence" mislabels a
+    // third-party platform as the place's own verified source.
     const osmUrl = osmTags.website || osmTags["contact:website"];
-    if (isRealHttpUrl(osmUrl)) {
+    if (isRealHttpUrl(osmUrl) && !isNonOfficialPlatform(osmUrl)) {
       const domain = domainOf(osmUrl);
       if (domain) return { officialUrl: osmUrl, officialDomain: domain, confidence: "high", method: "osm-tag" };
     }
@@ -108,7 +115,7 @@ export async function resolveOfficialSource(
     // --- 2. Wikidata's official-website property, when OSM links a wikidata id.
     if (osmTags.wikidata) {
       const wdUrl = await wikidataOfficialWebsite(osmTags.wikidata);
-      if (wdUrl) {
+      if (wdUrl && !isNonOfficialPlatform(wdUrl)) {
         const domain = domainOf(wdUrl);
         if (domain) return { officialUrl: wdUrl, officialDomain: domain, confidence: "high", method: "wikidata" };
       }

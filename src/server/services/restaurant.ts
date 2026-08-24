@@ -289,7 +289,36 @@ export interface RestaurantResearchParams {
 }
 
 const MAX_RESTAURANT_RESEARCH_CALLS = 5;
-const CANDIDATE_POOL_SIZE = 8; // closest-to-route OSM candidates actually researched, bounding real network cost
+const CANDIDATE_POOL_SIZE = 8; // candidates actually researched (real network calls), bounding real cost
+const DISTANCE_SHORTLIST_SIZE = 24; // cheap, no-network candidates considered for the pre-score below
+
+/**
+ * Free, no-network pre-score used only to decide WHICH candidates are worth
+ * spending the bounded real-research budget on — distance alone used to be
+ * the sole filter here (nearest 8, full stop), which means a highly notable,
+ * exactly-cuisine-matching restaurant a few hundred metres further away
+ * could never even be researched if 8 closer, unremarkable places existed —
+ * and central old-town districts routinely have that many restaurants
+ * within a very small radius. Distance still dominates (a genuinely good
+ * restaurant 2km off-route is still a bad choice), but notability and a
+ * stated cuisine preference — both already-available, free signals — now
+ * get a real say in which candidates are worth fetching at all, not just in
+ * ranking the ones that already made the cut.
+ */
+export function preScoreRestaurantCandidate(
+  candidate: ScoredCandidate,
+  detourMeters: number,
+  foodPreferences?: string[]
+): number {
+  const distanceScore = Math.max(0, 25 - detourMeters / 100); // same taper as the final routeCompat term
+  const notabilityScore = Math.min(10, candidate.notabilityScore * 2);
+  let cuisineScore = 0;
+  const cuisine = candidate.place.tags.cuisine;
+  if (cuisine && foodPreferences && foodPreferences.length > 0) {
+    if (foodPreferences.join(" ").toLowerCase().includes(cuisine.toLowerCase())) cuisineScore = 10;
+  }
+  return distanceScore + notabilityScore + cuisineScore;
+}
 
 /**
  * Selects and researches one restaurant for the trip's first reachable meal
@@ -312,12 +341,18 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     return { status: "no-candidates", considered: [], consideredCount: 0, reason: "OpenStreetMap'te restoran adayı bulunamadı", officialSourceMetrics: emptyOfficialSourceMetrics() };
   }
 
-  // Closest-to-route first — real, cheap (haversine, no network) proxy for
-  // detour cost, used only to decide which candidates are worth spending the
-  // bounded real-research budget on.
+  // Distance narrows the field first (still real, cheap, no-network), then
+  // notability/cuisine-fit decide which of those are actually worth
+  // researching — not distance alone, see preScoreRestaurantCandidate.
   const pool = [...params.restaurantCandidates]
     .map((c) => ({ c, detourMeters: haversineMeters(params.routeReferencePoint, c.place) }))
     .sort((a, b) => a.detourMeters - b.detourMeters)
+    .slice(0, DISTANCE_SHORTLIST_SIZE)
+    .sort(
+      (a, b) =>
+        preScoreRestaurantCandidate(b.c, b.detourMeters, params.foodPreferences) -
+        preScoreRestaurantCandidate(a.c, a.detourMeters, params.foodPreferences)
+    )
     .slice(0, CANDIDATE_POOL_SIZE);
 
   const considered: RestaurantCandidateResult[] = [];
@@ -471,7 +506,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
               // the site's own markup, tried before any model call (spec §3:
               // "inspect JSON-LD"). Only meaningful for real HTML, not
               // already-extracted PDF text.
-              const jsonLdItems = source.wasPdf ? [] : extractJsonLdMenuItems(source.text);
+              const jsonLdItems = source.wasPdf ? [] : extractJsonLdMenuItems(source.text, p.name);
               const usedJsonLd = jsonLdItems.length > 0;
               const extracted = usedJsonLd ? jsonLdItems : await extractMenuFromText(p.name, source.text);
 
