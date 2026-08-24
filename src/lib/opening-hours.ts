@@ -67,6 +67,66 @@ function expandDaySpec(spec: string): Set<DayToken> | null {
   return out;
 }
 
+interface DateClause {
+  month: number;
+  day: number;
+  endMonth: number;
+  endDay: number;
+}
+
+/** "Jan", "Aug", etc. — a real month token, used to type-narrow a regex capture group without an `as` cast at the call site. */
+function monthIndex(token: string): number {
+  return MONTH_TOKENS.indexOf(token as (typeof MONTH_TOKENS)[number]);
+}
+
+function parseSingleDateClause(token: string): DateClause | null {
+  const m = token
+    .trim()
+    .match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:-(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+)?(\d{1,2}))?$/);
+  if (!m) return null;
+  const month = monthIndex(m[1]);
+  const day = Number(m[2]);
+  if (day < 1 || day > 31) return null;
+  if (m[4] == null) return { month, day, endMonth: month, endDay: day }; // single date, not a range
+  const endMonth = m[3] ? monthIndex(m[3]) : month;
+  const endDay = Number(m[4]);
+  if (endDay < 1 || endDay > 31) return null;
+  return { month, day, endMonth, endDay };
+}
+
+function dateClauseContains(date: Date, c: DateClause): boolean {
+  const key = (mo: number, d: number) => mo * 100 + d;
+  const target = key(date.getMonth(), date.getDate());
+  const start = key(c.month, c.day);
+  const end = key(c.endMonth, c.endDay);
+  if (start <= end) return target >= start && target <= end;
+  return target >= start || target <= end; // wraps across year end
+}
+
+const DATE_CLAUSE_TOKEN_RE = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}(?:-(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+)?\\d{1,2})?";
+const LEADING_DATE_CLAUSES_RE = new RegExp(`^((?:${DATE_CLAUSE_TOKEN_RE})(?:,(?:${DATE_CLAUSE_TOKEN_RE}))*)\\s+(.*)$`);
+
+/**
+ * Consumes a leading comma-separated list of day-of-month-precision date
+ * clauses from the front of a rule — a single date ("Jan 01"), a same-month
+ * range ("Apr 01-31"), or a cross-month range ("Sep 01-Oct 18"). This is a
+ * real, common refinement of the whole-month-only range `monthInRange`
+ * already handled below, and a real gap without it: a rule for one
+ * completely unrelated specific date (e.g. a New Year's Day exception) used
+ * to fail the ENTIRE opening_hours string as "unparseable" — even when a
+ * later, perfectly parseable rule was the one that actually governed the
+ * requested date. Returns null when the rule does not start with this shape
+ * at all, so the caller falls through to its existing parsing rather than
+ * guessing.
+ */
+function consumeLeadingDateClauses(remainder: string, date: Date): { appliesToday: boolean; rest: string } | null {
+  const m = remainder.match(LEADING_DATE_CLAUSES_RE);
+  if (!m) return null;
+  const clauses = m[1].split(",").map(parseSingleDateClause);
+  if (clauses.some((c) => c === null)) return null; // regex guarantees this in practice; stay safe regardless
+  return { appliesToday: (clauses as DateClause[]).some((c) => dateClauseContains(date, c)), rest: m[2] };
+}
+
 function monthInRange(date: Date, spec: string): boolean | null {
   const range = spec.match(
     /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/
@@ -117,16 +177,48 @@ export function resolveOpeningHoursForDate(raw: string, date: Date): OpeningHour
     if (!rule) continue;
 
     let remainder = rule;
+    let dateClauseHandled = false;
 
-    // Optional leading month range, e.g. "Apr-Oct Mo-Fr 09:00-17:00".
-    const monthMatch = remainder.match(/^([A-Za-z]{3}-[A-Za-z]{3})\s+(.*)$/);
-    if (monthMatch && MONTH_TOKENS.some((m) => monthMatch[1].startsWith(m))) {
-      const inMonth = monthInRange(date, monthMatch[1]);
-      if (inMonth === null) {
-        return { status: "unparseable", reason: `anlaşılamayan ay aralığı: "${monthMatch[1]}"` };
+    // Leading day-of-month-precision date clause(s), e.g. "Jan 01", "Apr
+    // 01-31", "Sep 01-Oct 18" (comma-separated combinations of these) — see
+    // consumeLeadingDateClauses's own docstring for why this exists.
+    const dateClauseConsumed = consumeLeadingDateClauses(remainder, date);
+    if (dateClauseConsumed) {
+      if (!dateClauseConsumed.appliesToday) continue; // a real date, just not this one
+      remainder = dateClauseConsumed.rest;
+      dateClauseHandled = true;
+    }
+
+    // Optional leading month range, e.g. "Apr-Oct Mo-Fr 09:00-17:00" — only
+    // tried when a date clause didn't already establish today's applicability.
+    if (!dateClauseHandled) {
+      const monthMatch = remainder.match(/^([A-Za-z]{3}-[A-Za-z]{3})\s+(.*)$/);
+      if (monthMatch && MONTH_TOKENS.some((m) => monthMatch[1].startsWith(m))) {
+        const inMonth = monthInRange(date, monthMatch[1]);
+        if (inMonth === null) {
+          return { status: "unparseable", reason: `anlaşılamayan ay aralığı: "${monthMatch[1]}"` };
+        }
+        if (!inMonth) continue; // this rule does not apply in the given month
+        remainder = monthMatch[2];
       }
-      if (!inMonth) continue; // this rule does not apply in the given month
-      remainder = monthMatch[2];
+    }
+
+    // A holiday-calendar-dependent rule with no calendar this pipeline has
+    // access to (e.g. `"Jewish holidays" off`) — same treatment as the
+    // existing PH/SH day tokens below: never claimed either way, not guessed at.
+    if (/^"[^"]*"\s+/.test(remainder)) continue;
+
+    // A date clause commonly leaves a bare time spec with no day-of-week
+    // selector at all — OSM's own convention for "every day within this
+    // date/date range". Falls through to the day-token parsing below when
+    // the remainder isn't actually a bare time spec (e.g. a date clause
+    // followed by its own day selector, "Sep 01-Oct 18 Sa,Su 10:00-16:00").
+    if (dateClauseHandled) {
+      const bareTime = parseTimeSpec(remainder);
+      if (bareTime !== null) {
+        result = bareTime === "off" ? { status: "closed" } : { status: "open", windows: bareTime };
+        continue;
+      }
     }
 
     const spaceIdx = remainder.indexOf(" ");

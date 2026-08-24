@@ -135,3 +135,72 @@ describe("widestWindow", () => {
     expect(widestWindow({ status: "unparseable", reason: "x" })).toBeNull();
   });
 });
+
+describe("resolveOpeningHoursForDate — day-of-month date clauses", () => {
+  // Tuesday, 2026-09-29 — a real trip date used live this session.
+  const TUESDAY = new Date("2026-09-29T12:00:00");
+
+  it(
+    "real regression: Prague's Old-New Synagogue's real OSM opening_hours string used to fail " +
+      'entirely (status "unparseable") because of its FIRST rule alone, a single unrelated New ' +
+      "Year's Day exception (\"Jan 01 11:00-17:00\") — even though a later, perfectly parseable " +
+      'rule ("Sep 01-Oct 18 09:00-18:00") was the one that actually governed the requested date',
+    () => {
+      const real =
+        'Jan 01 11:00-17:00; Jan 02-Mar 31,Oct 19-Dec 31 09:00-17:00; ' +
+        "Apr 01-31,Sep 01-Oct 18 09:00-18:00; May 01-Aug 31 09:00-19:00; " +
+        'Aug 03 11:00-19:00; Dec 24 09:00-14:00; Sa off; "Jewish holidays" off';
+      const r = resolveOpeningHoursForDate(real, TUESDAY);
+      expect(r).toEqual({ status: "open", windows: [{ open: "09:00", close: "18:00" }] });
+    }
+  );
+
+  it("resolves a single specific date that matches the target date", () => {
+    const r = resolveOpeningHoursForDate("Jan 01 11:00-17:00", new Date("2026-01-01T12:00:00"));
+    expect(r).toEqual({ status: "open", windows: [{ open: "11:00", close: "17:00" }] });
+  });
+
+  it("skips a single specific date that does not match, falling through to closed", () => {
+    const r = resolveOpeningHoursForDate("Jan 01 11:00-17:00", TUESDAY);
+    expect(r.status).toBe("closed");
+  });
+
+  it("resolves a same-month day range (e.g. 'Apr 01-31')", () => {
+    const r = resolveOpeningHoursForDate("Apr 01-31 10:00-16:00", new Date("2026-04-15T12:00:00"));
+    expect(r).toEqual({ status: "open", windows: [{ open: "10:00", close: "16:00" }] });
+  });
+
+  it("resolves a cross-month day range (e.g. 'Sep 01-Oct 18')", () => {
+    const r = resolveOpeningHoursForDate("Sep 01-Oct 18 09:00-18:00", TUESDAY);
+    expect(r).toEqual({ status: "open", windows: [{ open: "09:00", close: "18:00" }] });
+    // Just past the range end (Oct 19) should not match the same rule.
+    const past = resolveOpeningHoursForDate("Sep 01-Oct 18 09:00-18:00", new Date("2026-10-19T12:00:00"));
+    expect(past.status).toBe("closed");
+  });
+
+  it("respects a day-of-week selector that follows a date clause (not treated as bare 'every day')", () => {
+    const r = resolveOpeningHoursForDate("Sep 01-Oct 18 Sa,Su 10:00-16:00", TUESDAY);
+    expect(r.status).toBe("closed"); // Tuesday, not a weekend, even though the date range matches
+    const weekend = resolveOpeningHoursForDate("Sep 01-Oct 18 Sa,Su 10:00-16:00", new Date("2026-10-03T12:00:00")); // a Saturday within range
+    expect(weekend).toEqual({ status: "open", windows: [{ open: "10:00", close: "16:00" }] });
+  });
+
+  it(
+    "skips a quoted holiday-calendar rule with no calendar available, same treatment as PH/SH " +
+      '(real case: \'"Jewish holidays" off\')',
+    () => {
+      const r = resolveOpeningHoursForDate('Mo-Fr 09:00-17:00; "Jewish holidays" off', THURSDAY);
+      expect(r).toEqual({ status: "open", windows: [{ open: "09:00", close: "17:00" }] });
+    }
+  );
+
+  it("a later date-clause rule for the same day still overrides an earlier one", () => {
+    const r = resolveOpeningHoursForDate("Sep 01-Oct 18 09:00-18:00; Sep 29 12:00-15:00", TUESDAY);
+    expect(r).toEqual({ status: "open", windows: [{ open: "12:00", close: "15:00" }] });
+  });
+
+  it("still refuses a genuinely unparseable date-clause-shaped rule rather than guessing", () => {
+    const r = resolveOpeningHoursForDate("Sep 32-Oct 18 09:00-18:00", TUESDAY); // invalid day-of-month
+    expect(r.status).toBe("unparseable");
+  });
+});
