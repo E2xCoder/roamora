@@ -104,7 +104,12 @@ function dateClauseContains(date: Date, c: DateClause): boolean {
 }
 
 const DATE_CLAUSE_TOKEN_RE = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}(?:-(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+)?\\d{1,2})?";
-const LEADING_DATE_CLAUSES_RE = new RegExp(`^((?:${DATE_CLAUSE_TOKEN_RE})(?:,(?:${DATE_CLAUSE_TOKEN_RE}))*)\\s+(.*)$`);
+// A colon after the date-clause list is real, common, and optional in real
+// OSM data (e.g. "Mar 15-Nov 30: Mo-Su 10:00-18:00" — a real Prague
+// landmark's real hours) — `:?\s+` accepts it either way, never requiring
+// it, since the same real data this parser already handled has no colon at
+// all (e.g. "Apr 01-31,Sep 01-Oct 18 09:00-18:00").
+const LEADING_DATE_CLAUSES_RE = new RegExp(`^((?:${DATE_CLAUSE_TOKEN_RE})(?:,(?:${DATE_CLAUSE_TOKEN_RE}))*):?\\s+(.*)$`);
 
 /**
  * Consumes a leading comma-separated list of day-of-month-precision date
@@ -141,15 +146,39 @@ function monthInRange(date: Date, spec: string): boolean | null {
   return m >= start || m <= end; // wraps across year end, e.g. Nov-Feb
 }
 
+/**
+ * Validates one HH:MM clock time, accepting OSM's legal special value
+ * "24:00" (end of day — distinct from "00:00", the start of the day) in
+ * addition to the normal 00:00-23:59 range. Real, live-observed gap: a real
+ * Prague restaurant's real OSM hours ("Mo-Su 18:00-24:00,11:30-15:00" —
+ * dinner service until midnight) failed to parse at all, since "24" was
+ * outside the old regex's accepted hour range entirely — and a midnight (or
+ * later) closing time is an extremely common, unremarkable shape for
+ * exactly the kind of venue (restaurants, bars) an itinerary most needs
+ * real hours for. Normalized to "23:59" rather than kept as literal
+ * "24:00", so it stays inside the [00:00, 23:59] range every other HH:MM
+ * consumer in this codebase already assumes — a lost minute of precision is
+ * a fair trade for not introducing a new "hour 24" edge case downstream.
+ */
+function parseClockTime(token: string): string | null {
+  const m = token.match(/^([01]\d|2[0-3]|24):([0-5]\d)$/);
+  if (!m) return null;
+  if (m[1] === "24") return m[2] === "00" ? "23:59" : null; // "24:00" only, never e.g. "24:15"
+  return `${m[1]}:${m[2]}`;
+}
+
 function parseTimeSpec(spec: string): DayWindow[] | "off" | null {
   const trimmed = spec.trim();
   if (trimmed === "off" || trimmed === "closed") return "off";
 
   const windows: DayWindow[] = [];
   for (const part of trimmed.split(",")) {
-    const m = part.trim().match(/^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/);
-    if (!m) return null;
-    windows.push({ open: `${m[1]}:${m[2]}`, close: `${m[3]}:${m[4]}` });
+    const [openRaw, closeRaw, ...rest] = part.trim().split("-");
+    if (openRaw == null || closeRaw == null || rest.length > 0) return null;
+    const open = parseClockTime(openRaw);
+    const close = parseClockTime(closeRaw);
+    if (open === null || close === null) return null;
+    windows.push({ open, close });
   }
   return windows.length > 0 ? windows : null;
 }
@@ -208,17 +237,21 @@ export function resolveOpeningHoursForDate(raw: string, date: Date): OpeningHour
     // existing PH/SH day tokens below: never claimed either way, not guessed at.
     if (/^"[^"]*"\s+/.test(remainder)) continue;
 
-    // A date clause commonly leaves a bare time spec with no day-of-week
-    // selector at all — OSM's own convention for "every day within this
-    // date/date range". Falls through to the day-token parsing below when
-    // the remainder isn't actually a bare time spec (e.g. a date clause
-    // followed by its own day selector, "Sep 01-Oct 18 Sa,Su 10:00-16:00").
-    if (dateClauseHandled) {
-      const bareTime = parseTimeSpec(remainder);
-      if (bareTime !== null) {
-        result = bareTime === "off" ? { status: "closed" } : { status: "open", windows: bareTime };
-        continue;
-      }
+    // A bare time spec with no day-of-week selector at all means "every
+    // day" — OSM's own convention, and a real, common, minimal authoring
+    // shape on its own (real case: a church's whole opening_hours tag was
+    // just "10:00-17:00", no day-of-week rule at all — every day, all
+    // week). Also what a date clause commonly leaves once its own scope is
+    // established ("every day within this date/date range"). Falls through
+    // to the day-token parsing below when the remainder isn't actually a
+    // bare time spec (e.g. a day selector follows, "Sep 01-Oct 18 Sa,Su
+    // 10:00-16:00", or a day-token rule like "Mo-Fr 09:00-17:00" — which
+    // parseTimeSpec itself rejects, since it splits into more than two
+    // dash-separated pieces).
+    const bareTime = parseTimeSpec(remainder);
+    if (bareTime !== null) {
+      result = bareTime === "off" ? { status: "closed" } : { status: "open", windows: bareTime };
+      continue;
     }
 
     const spaceIdx = remainder.indexOf(" ");

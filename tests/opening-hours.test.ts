@@ -203,4 +203,110 @@ describe("resolveOpeningHoursForDate — day-of-month date clauses", () => {
     const r = resolveOpeningHoursForDate("Sep 32-Oct 18 09:00-18:00", TUESDAY); // invalid day-of-month
     expect(r.status).toBe("unparseable");
   });
+
+  it(
+    "real regression: a date clause may be followed by a colon before its own day-of-week+time " +
+      'rule, e.g. "Mar 15-Nov 30: Mo-Su 10:00-18:00" (real case: Prague\'s Klementinum) — the ' +
+      "date clause establishes the season is right, but a day selector still follows and must " +
+      "still be checked, not treated as a bare 'every day' time spec",
+    () => {
+      const summer = resolveOpeningHoursForDate("Mar 15-Nov 30: Mo-Su 10:00-18:00", TUESDAY);
+      expect(summer).toEqual({ status: "open", windows: [{ open: "10:00", close: "18:00" }] });
+      const winter = resolveOpeningHoursForDate("Mar 15-Nov 30: Mo-Su 10:00-18:00", new Date("2026-12-25T12:00:00"));
+      expect(winter.status).toBe("closed"); // outside the Mar 15-Nov 30 season
+    }
+  );
+
+  it(
+    "real regression: Klementinum's full real OSM opening_hours string (seasonal hours plus a " +
+      "year-wrapping winter range, each with its own day-of-week exceptions) resolves correctly " +
+      "for a real trip date, after both the colon-separator and cross-rule precedence are handled",
+    () => {
+      const real =
+        "Mar 15-Nov 30: Mo-Su 10:00-18:00; Dec 01-Dec 15: Su-Th 10:00-17:30; Fr,Sa 10:00-18:00; " +
+        "Dec 16-Jan 10: Mo-Su 10:00-18:00; Jan 11-Mar 14: Su-Th 10:00-17:30; Fr,Sa 10:00-18:00";
+      expect(resolveOpeningHoursForDate(real, TUESDAY)).toEqual({
+        status: "open",
+        windows: [{ open: "10:00", close: "18:00" }],
+      });
+      // A Thursday in mid-December: Dec 01-Dec 15 season, Su-Th 10:00-17:30 applies.
+      const midDecThu = resolveOpeningHoursForDate(real, new Date("2026-12-10T12:00:00"));
+      expect(midDecThu).toEqual({ status: "open", windows: [{ open: "10:00", close: "17:30" }] });
+    }
+  );
+});
+
+describe("resolveOpeningHoursForDate — bare time spec with no day-of-week selector", () => {
+  it(
+    'real regression: a real Prague church\'s entire OSM opening_hours tag was just "10:00-17:00" ' +
+      "— no day-of-week rule at all, meaning every day of the week — which used to fail outright " +
+      "since the parser required at least one space to split a day-token from the time",
+    () => {
+      const r = resolveOpeningHoursForDate("10:00-17:00", THURSDAY);
+      expect(r).toEqual({ status: "open", windows: [{ open: "10:00", close: "17:00" }] });
+      expect(resolveOpeningHoursForDate("10:00-17:00", SATURDAY)).toEqual({
+        status: "open",
+        windows: [{ open: "10:00", close: "17:00" }],
+      });
+    }
+  );
+
+  it("treats a bare 'off'/'closed' (no day-of-week) as closed every day", () => {
+    expect(resolveOpeningHoursForDate("off", THURSDAY).status).toBe("closed");
+    expect(resolveOpeningHoursForDate("closed", SATURDAY).status).toBe("closed");
+  });
+
+  it("still requires day-token rules to actually be parsed as such, not swallowed by the bare-time check", () => {
+    const r = resolveOpeningHoursForDate("Mo-Fr 09:00-17:00", SATURDAY);
+    expect(r.status).toBe("closed"); // Saturday is outside Mo-Fr
+    expect(resolveOpeningHoursForDate("Mo-Fr 09:00-17:00", THURSDAY)).toEqual({
+      status: "open",
+      windows: [{ open: "09:00", close: "17:00" }],
+    });
+  });
+
+  it("handles multiple bare time windows with no day selector (lunch-break shape, no day rule)", () => {
+    const r = resolveOpeningHoursForDate("09:00-12:00,13:00-17:00", THURSDAY);
+    expect(r).toEqual({
+      status: "open",
+      windows: [
+        { open: "09:00", close: "12:00" },
+        { open: "13:00", close: "17:00" },
+      ],
+    });
+  });
+});
+
+describe("resolveOpeningHoursForDate — '24:00' end-of-day closing time", () => {
+  it(
+    "real regression: a real Prague restaurant's real OSM hours (dinner service until " +
+      'midnight, "Mo-Su 18:00-24:00,11:30-15:00") used to fail entirely — "24" was outside the ' +
+      "old time regex's accepted 00-23 hour range, even though a midnight-or-later closing time " +
+      "is an extremely common, unremarkable real-world shape",
+    () => {
+      const r = resolveOpeningHoursForDate("Mo-Su 18:00-24:00,11:30-15:00", THURSDAY);
+      expect(r).toEqual({
+        status: "open",
+        windows: [
+          { open: "18:00", close: "23:59" },
+          { open: "11:30", close: "15:00" },
+        ],
+      });
+    }
+  );
+
+  it("normalizes a bare '24:00' close time to '23:59', staying inside the same-day HH:MM range", () => {
+    const r = resolveOpeningHoursForDate("Mo-Fr 09:00-24:00", THURSDAY);
+    expect(r).toEqual({ status: "open", windows: [{ open: "09:00", close: "23:59" }] });
+  });
+
+  it("rejects any other reading of hour 24 (e.g. '24:15') rather than guessing what it means", () => {
+    const r = resolveOpeningHoursForDate("Mo-Fr 09:00-24:15", THURSDAY);
+    expect(r.status).toBe("unparseable");
+  });
+
+  it("still rejects a plain out-of-range hour like '25:00'", () => {
+    const r = resolveOpeningHoursForDate("Mo-Fr 09:00-25:00", THURSDAY);
+    expect(r.status).toBe("unparseable");
+  });
 });
