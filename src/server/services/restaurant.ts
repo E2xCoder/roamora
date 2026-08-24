@@ -5,7 +5,7 @@ import { resolveOpeningHoursForDate, widestWindow } from "@/lib/opening-hours";
 import { searxngProvider, SearchUnavailableError } from "@/server/providers/research/searxng";
 import { extractFactsFromText, htmlToPlainText, ExtractionUnavailableError } from "@/server/services/fact-extraction";
 import { validateExtractedOpeningHours } from "@/server/services/opening-hours-guard";
-import { validateExtractedPrice } from "@/server/services/price-guard";
+import { validateExtractedPrice, normalizeCurrency } from "@/server/services/price-guard";
 import { extractMenuFromText, extractLocalFoodFromText, extractJsonLdMenuItems, type ExtractedMenuItem } from "@/server/services/restaurant-extraction";
 import { isMenuItemNameSupported, isLikelyNavigationLabel, estimateQueueSignal, scoreTouristTrapRisk, type QueueEstimate, type TouristTrapRisk } from "@/server/services/restaurant-guard";
 import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
@@ -144,6 +144,26 @@ export interface LocalFoodResult {
   /** Real, named food/restaurant listings from Wikivoyage's structured {{eat|...}} entries, when that source was used — independent of the six named fields above, and never LLM-derived. */
   curatedListings?: Array<{ name: string; description?: string }>;
   reason?: string;
+}
+
+/**
+ * A real menu overwhelmingly has at least one priced item on it — a page
+ * that "found" several item-shaped names but not a single price anywhere
+ * is the observable shape of the LLM extracting from a page that was never
+ * actually a menu at all, not a real priceless menu. Two real, live-
+ * confirmed cases: a restaurant's marketing homepage prose about beer-pour
+ * styles ("hladinka", "šnyt", "mlíko"...) extracted as if they were dishes
+ * when no dedicated menu page could be found so the crawler fell back to
+ * the homepage; a site's mobile-nav "Hamburger" menu-TOGGLE label extracted
+ * as a burger. Both passed the existing textual-support and
+ * navigation-label guards (the text genuinely is on the page, and neither
+ * looks like a literal "Menu"/"Home" nav link) — only the complete absence
+ * of any real price across the whole batch gives this away. A genuinely
+ * priceless tasting menu is rarer than this false-positive pattern, and
+ * reporting "unavailable" is the correct failure direction either way.
+ */
+export function looksLikeRealMenu(items: MenuItemResult[]): boolean {
+  return items.length > 0 && items.some((i) => i.price != null);
 }
 
 function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
@@ -476,7 +496,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
                 const priceGuardResult = validateExtractedPrice(facts.facts.priceAmount, facts.facts.priceCurrency, sourceText);
                 if (priceGuardResult.status !== "unknown") {
                   fallbackCost = priceGuardResult.amount;
-                  fallbackCurrency = facts.facts.priceCurrency ?? undefined;
+                  fallbackCurrency = priceGuardResult.currency ?? undefined;
                 }
               }
             }
@@ -521,7 +541,9 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
                   // wrong. The site's own structured markup is trusted
                   // directly instead, same as how search engines consume it.
                   const priceGuardResult = usedJsonLd
-                    ? (item.price != null ? { status: "valid" as const, amount: item.price } : { status: "unknown" as const })
+                    ? (item.price != null
+                        ? { status: "valid" as const, amount: item.price, currency: normalizeCurrency(item.currency) }
+                        : { status: "unknown" as const })
                     : validateExtractedPrice(item.price, item.currency, sourceText);
                   const hasPrice = priceGuardResult.status !== "unknown";
                   return {
@@ -529,7 +551,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
                     name: item.name,
                     description: item.description ?? undefined,
                     price: hasPrice ? priceGuardResult.amount : undefined,
-                    currency: hasPrice ? (item.currency ?? undefined) : undefined,
+                    currency: hasPrice ? (priceGuardResult.currency ?? undefined) : undefined,
                     portion: item.portion ?? undefined,
                     isLocalSpecialty: item.isLocalSpecialty,
                     isVegetarian: item.isVegetarian,
@@ -545,9 +567,18 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
                   };
                 });
 
-              menuAvailability = menuItems.length > 0
-                ? { status: "extracted" }
-                : { status: "unavailable", reason: "sayfada gerçek içerik var ama güvenilir bir menü öğesi bulunamadı" };
+              if (!looksLikeRealMenu(menuItems)) {
+                const foundUnpricedItems = menuItems.length > 0;
+                menuItems = [];
+                menuAvailability = {
+                  status: "unavailable",
+                  reason: foundUnpricedItems
+                    ? "sayfada menü olmayan içerik menü öğesi olarak algılanmış olabilir (hiçbir öğede fiyat bulunamadı) — güvenilir bir menü doğrulanamadı"
+                    : "sayfada gerçek içerik var ama güvenilir bir menü öğesi bulunamadı",
+                };
+              } else {
+                menuAvailability = { status: "extracted" };
+              }
 
               const trap = scoreTouristTrapRisk(sourceText, official);
               touristTrapRisk = trap.risk;

@@ -27,6 +27,11 @@ const NAV_LABEL_EXACT = new Set([
   "home", "about", "about us", "contact", "contact us", "gallery", "reservations", "reservation",
   "location", "locations", "hours", "opening hours", "directions", "faq", "careers", "jobs",
   "privacy policy", "terms of service", "terms & conditions", "cookie policy",
+  // Real, live-observed case: a restaurant site's mobile-nav menu-TOGGLE
+  // button ("Hamburger Toggle Menu") was extracted as if "Hamburger" were a
+  // dish — the icon's own common name is a false positive precisely because
+  // it is also a real food word.
+  "hamburger", "hamburger menu", "hamburger toggle menu", "toggle menu", "toggle navigation",
   // multilingual, matching the codebase's existing multilingual practice
   "speisekarte ansehen", "jetzt bestellen", "tisch reservieren", // German
   "zobacz menu", "zamów teraz", "zarezerwuj stolik", // Polish

@@ -49,6 +49,18 @@ describe("isLikelyNavigationLabel", () => {
     expect(isLikelyNavigationLabel("   ")).toBe(true);
   });
 
+  it(
+    "real regression: rejects a mobile-nav menu-toggle button's own name, live-observed as " +
+      "extracted from a real restaurant's homepage (\"Hamburger Toggle Menu\") as if \"Hamburger\" " +
+      "were a dish — the icon's common name is a false positive precisely because it is also a " +
+      "real food word",
+    () => {
+      expect(isLikelyNavigationLabel("Hamburger")).toBe(true);
+      expect(isLikelyNavigationLabel("Hamburger Toggle Menu")).toBe(true);
+      expect(isLikelyNavigationLabel("Toggle Navigation")).toBe(true);
+    }
+  );
+
   it("does NOT reject a real, genuinely orderable 'X Menu' prix-fixe item", () => {
     expect(isLikelyNavigationLabel("Tasting Menu")).toBe(false);
     expect(isLikelyNavigationLabel("Chef's Menu")).toBe(false);

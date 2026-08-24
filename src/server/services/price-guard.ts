@@ -15,10 +15,32 @@ import { detectStaleness } from "@/server/services/confidence";
  */
 
 export type PriceGuardResult =
-  | { status: "valid"; amount: number; priceType: "standard" }
-  | { status: "valid-minimum"; amount: number } // "from €23" — a floor, not the full/standard price
-  | { status: "valid-reduced"; amount: number } // a child/student/senior fare, not the standard adult price
+  | { status: "valid"; amount: number; currency: string | null; priceType: "standard" }
+  | { status: "valid-minimum"; amount: number; currency: string | null } // "from €23" — a floor, not the full/standard price
+  | { status: "valid-reduced"; amount: number; currency: string | null } // a child/student/senior fare, not the standard adult price
   | { status: "unknown"; reason: string };
+
+/**
+ * A real currency symbol/code, not the punctuation Central-European price
+ * notation ("169,-" — a whole number, no decimals) gets mistaken for one.
+ * Real, live-observed case: extracting a real Prague restaurant's real menu
+ * ("169,-" meaning 169 Kč) returned `currency: ",-"` for every single item —
+ * the model read the price-formatting mark itself as if it were the stated
+ * currency. An ISO 4217 code is always exactly 3 letters; everything else
+ * must match a real, known symbol/shorthand actually seen in this
+ * pipeline's real research — never accepted on "not obviously wrong" alone.
+ */
+const KNOWN_CURRENCY_SYMBOLS = new Set([
+  "€", "$", "£", "¥", "₺", "₽", "₹", "₩", "zł", "kč", "ft", "kr", "chf", "r$",
+]);
+
+export function normalizeCurrency(raw: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (/^[a-z]{3}$/i.test(trimmed)) return trimmed.toUpperCase(); // ISO 4217 shape
+  if (KNOWN_CURRENCY_SYMBOLS.has(trimmed.toLowerCase())) return trimmed;
+  return null;
+}
 
 function normalize(s: string): string {
   return s.toLowerCase().normalize("NFKD").replace(/\s+/g, " ").trim();
@@ -85,14 +107,15 @@ export function validateExtractedPrice(
     return { status: "unknown", reason: "fiyat eski bir güncelleme tarihi yakınında bulundu, güncel olmayabilir" };
   }
 
+  const validCurrency = normalizeCurrency(currency);
   const before = contextWindow(normalizedSource, offset);
 
   if (REDUCED_PRICE_WORDS.some((w) => before.includes(w))) {
-    return { status: "valid-reduced", amount };
+    return { status: "valid-reduced", amount, currency: validCurrency };
   }
   if (MINIMUM_PRICE_WORDS.some((w) => before.includes(w))) {
-    return { status: "valid-minimum", amount };
+    return { status: "valid-minimum", amount, currency: validCurrency };
   }
 
-  return { status: "valid", amount, priceType: "standard" };
+  return { status: "valid", amount, currency: validCurrency, priceType: "standard" };
 }

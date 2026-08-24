@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateExtractedPrice } from "@/server/services/price-guard";
+import { validateExtractedPrice, normalizeCurrency } from "@/server/services/price-guard";
 
 // Real plain text captured this session from bramapoznania.pl/cennik (Brama
 // Poznania ICHOT's real, official ticket price page) — genuinely has both a
@@ -15,6 +15,7 @@ describe("validateExtractedPrice", () => {
     expect(validateExtractedPrice(35, "zł", REAL_BRAMA_POZNANIA_TEXT)).toEqual({
       status: "valid",
       amount: 35,
+      currency: "zł",
       priceType: "standard",
     });
   });
@@ -23,6 +24,7 @@ describe("validateExtractedPrice", () => {
     expect(validateExtractedPrice(29, "zł", REAL_BRAMA_POZNANIA_TEXT)).toEqual({
       status: "valid-reduced",
       amount: 29,
+      currency: "zł",
     });
   });
 
@@ -30,6 +32,7 @@ describe("validateExtractedPrice", () => {
     expect(validateExtractedPrice(23, "€", "Tickets from €23 per person, options available")).toEqual({
       status: "valid-minimum",
       amount: 23,
+      currency: "€",
     });
   });
 
@@ -37,6 +40,7 @@ describe("validateExtractedPrice", () => {
     expect(validateExtractedPrice(15, "€", "Eintritt ab 15 € pro Person")).toEqual({
       status: "valid-minimum",
       amount: 15,
+      currency: "€",
     });
   });
 
@@ -44,6 +48,7 @@ describe("validateExtractedPrice", () => {
     expect(validateExtractedPrice(10, "€", "Erwachsene 25 €, Kinder 10 €")).toEqual({
       status: "valid-reduced",
       amount: 10,
+      currency: "€",
     });
   });
 
@@ -81,7 +86,47 @@ describe("validateExtractedPrice", () => {
     expect(validateExtractedPrice(25, "€", "Adults: 25 €. Free for children under 4.")).toEqual({
       status: "valid",
       amount: 25,
+      currency: "€",
       priceType: "standard",
     });
+  });
+
+  it(
+    "real regression: Central-European '169,-' (whole-number) price notation must not be read " +
+      "as the currency itself — live-observed: extracting a real Prague restaurant's real menu " +
+      'returned currency ",-" for every single item',
+    () => {
+      const result = validateExtractedPrice(169, ",-", "Minestrone 169,- Kč");
+      expect(result.status).toBe("valid");
+      expect((result as { currency: string | null }).currency).toBeNull();
+    }
+  );
+
+  it("accepts a real ISO 4217 currency code", () => {
+    const result = validateExtractedPrice(169, "CZK", "Price: 169 CZK");
+    expect((result as { currency: string | null }).currency).toBe("CZK");
+  });
+});
+
+describe("normalizeCurrency", () => {
+  it("returns null for punctuation mistaken for a currency (the real ',-' regression)", () => {
+    expect(normalizeCurrency(",-")).toBeNull();
+    expect(normalizeCurrency("-")).toBeNull();
+  });
+
+  it("returns null for null/empty input", () => {
+    expect(normalizeCurrency(null)).toBeNull();
+    expect(normalizeCurrency("")).toBeNull();
+  });
+
+  it("uppercases a real 3-letter ISO 4217 code", () => {
+    expect(normalizeCurrency("czk")).toBe("CZK");
+    expect(normalizeCurrency("EUR")).toBe("EUR");
+  });
+
+  it("accepts a known real currency symbol as-is", () => {
+    expect(normalizeCurrency("€")).toBe("€");
+    expect(normalizeCurrency("zł")).toBe("zł");
+    expect(normalizeCurrency("Kč")).toBe("Kč");
   });
 });

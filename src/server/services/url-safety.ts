@@ -195,6 +195,30 @@ export async function fetchTextCapped(
  * is left untouched for every other caller (the import pipeline, etc.)
  * that has no PDF-handling contract and should not silently change shape.
  */
+/**
+ * Content-Types this pipeline has no real extraction path for at all — a
+ * menu-keyword-scored link routinely resolves to a photographed menu, not
+ * text (real, live-observed case: a Prague restaurant's "poledni-menu" link
+ * was `Content-Type: image/jpeg`, a real JPEG photo of their weekly lunch
+ * menu, no OCR anywhere in this pipeline). Without this check, the fallback
+ * below UTF-8-decodes the raw binary as if it were HTML — image/audio/video
+ * bytes routinely contain enough incidentally-ASCII-range byte sequences
+ * (EXIF/ICC/ID3 metadata strings, etc.) to pass the real-text-ratio check
+ * and reach the LLM extractor as "real content", wasting a call on pure
+ * noise and leaving one bad LLM response away from a hallucinated menu item
+ * instead of an honest, clearly-reasoned "unavailable".
+ */
+const UNSUPPORTED_BINARY_CONTENT_TYPE_RE = /^(image|video|audio)\//i;
+const UNSUPPORTED_BINARY_EXACT_CONTENT_TYPES = new Set([
+  "application/octet-stream", "application/zip", "application/x-zip-compressed",
+]);
+
+export function isUnsupportedBinaryContentType(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const type = contentType.split(";")[0].trim().toLowerCase();
+  return UNSUPPORTED_BINARY_CONTENT_TYPE_RE.test(type) || UNSUPPORTED_BINARY_EXACT_CONTENT_TYPES.has(type);
+}
+
 export async function fetchTextOrPdfCapped(
   url: string,
   init?: RequestInit
@@ -210,6 +234,9 @@ export async function fetchTextOrPdfCapped(
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? `PDF ayrıştırılamadı: ${err.message}` : "PDF ayrıştırılamadı" };
     }
+  }
+  if (isUnsupportedBinaryContentType(fetched.contentType)) {
+    return { ok: false, reason: `Bu sayfa metin değil (${fetched.contentType}) — ör. fotoğraflanmış bir menü, metin çıkarımı desteklenmiyor` };
   }
   return { ok: true, text: new TextDecoder().decode(fetched.bytes), wasPdf: false };
 }

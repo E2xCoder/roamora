@@ -4,8 +4,10 @@ import {
   restaurantStopInput,
   researchRestaurant,
   preScoreRestaurantCandidate,
+  looksLikeRealMenu,
   type RestaurantCandidateResult,
   type RestaurantResearchParams,
+  type MenuItemResult,
 } from "@/server/services/restaurant";
 import type { ScoredCandidate } from "@/server/services/discovery-scoring";
 import type { DiscoveredPlace } from "@/server/providers/discovery/types";
@@ -194,6 +196,48 @@ describe("researchRestaurant", () => {
       expect(result.considered.some((c) => c.name === "Notable Farther")).toBe(true);
     }
   );
+});
+
+function menuItem(overrides: Partial<MenuItemResult> = {}): MenuItemResult {
+  return {
+    category: "Menu",
+    name: "Test Item",
+    isLocalSpecialty: false,
+    isVegetarian: false,
+    isVegan: false,
+    source: "unverified",
+    confidence: "unknown",
+    ...overrides,
+  };
+}
+
+describe("looksLikeRealMenu", () => {
+  it("returns false for an empty list", () => {
+    expect(looksLikeRealMenu([])).toBe(false);
+  });
+
+  it(
+    "real regression: rejects a batch where nothing has a price — the observed shape of a " +
+      "restaurant's marketing homepage (beer-pour-style words like \"hladinka\"/\"šnyt\"/" +
+      '"mlíko") or a mobile-nav "Hamburger" menu-toggle label being extracted as if they were ' +
+      "dishes, since neither ever has a real price attached",
+    () => {
+      const glossaryLookingItems = [
+        menuItem({ name: "hladinku" }),
+        menuItem({ name: "šnyt" }),
+        menuItem({ name: "mlíko" }),
+      ];
+      expect(looksLikeRealMenu(glossaryLookingItems)).toBe(false);
+    }
+  );
+
+  it("accepts a batch where at least one item has a real price", () => {
+    const items = [
+      menuItem({ name: "Minestrone", price: 49, currency: "CZK" }),
+      menuItem({ name: "Daily special (price on request)" }), // one unpriced item alongside real priced ones is fine
+    ];
+    expect(looksLikeRealMenu(items)).toBe(true);
+  });
 });
 
 describe("preScoreRestaurantCandidate", () => {
