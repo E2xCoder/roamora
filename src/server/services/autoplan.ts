@@ -5,6 +5,7 @@ import { scoreCandidates, pruneAndDiversify, isSightseeingCandidate } from "@/se
 import { resolveOpeningHoursForDate, widestWindow } from "@/lib/opening-hours";
 import { findPlaceSummary } from "@/server/providers/research/wikipedia-summary";
 import { searxngProvider, SearchUnavailableError } from "@/server/providers/research/searxng";
+import type { WebSearchResult } from "@/server/providers/research/types";
 import {
   extractFactsFromText,
   htmlToPlainText,
@@ -21,7 +22,8 @@ import {
   type RestaurantResearchResult,
   type LocalFoodResult,
 } from "@/server/services/restaurant";
-import { scoreConfidence, detectStaleness, selectBestResult, type ConfidenceLevel } from "@/server/services/confidence";
+import { scoreConfidence, detectStaleness, selectBestResult, hasNameRelevance, type ConfidenceLevel } from "@/server/services/confidence";
+import { scoreLinkForFactType } from "@/server/services/official-site-crawler";
 import { resolveResearchSource } from "@/server/services/direct-research";
 import { fetchTextCapped } from "@/server/services/url-safety";
 import { fetchMatrix } from "@/server/services/osrm-matrix";
@@ -286,6 +288,35 @@ function subtractMinutes(hhmm: string, minutes: number): string {
   const [h, m] = hhmm.split(":").map(Number);
   const total = ((h * 60 + m - minutes) % (24 * 60) + 24 * 60) % (24 * 60);
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Picks which SearXNG result to use as the autonomous event-discovery
+ * source. `selectBestResult` alone is the wrong tool for this: it is built
+ * to find a PLACE's own official site (name-relevance + "does this domain
+ * look like the place's own"), and a generic, SEO-heavy travel/hotel-
+ * booking page passes both checks trivially — real, live-observed case:
+ * "prague-cz.com", a "top attractions / where to stay" landing page with
+ * zero actual dated events, is obviously "Prague"-relevant and its domain
+ * slug alone reads as official-looking, so every real autoplan run this
+ * session picked exactly this kind of page (correctly finding 0 events on
+ * it — not a wrong result, but a real, avoidable miss). Preferring a
+ * candidate that actually LOOKS like an events/calendar page — reusing the
+ * same real, multilingual event-keyword vocabulary official-site-
+ * crawler.ts already uses for a place's own site — fixes the miss without
+ * weakening anything: when no candidate looks event-shaped at all, this
+ * still falls back to the previous behavior exactly.
+ */
+export function selectEventDiscoverySource(
+  results: WebSearchResult[],
+  destination: string
+): WebSearchResult | undefined {
+  const relevant = results.filter((r) => hasNameRelevance(r, destination));
+  const eventShaped = relevant
+    .map((r) => ({ r, score: scoreLinkForFactType(r.url, r.title, "event") }))
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return eventShaped[0]?.r ?? selectBestResult(relevant, destination);
 }
 
 function addMinutes(hhmm: string, minutes: number): string {
@@ -868,7 +899,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       const year = req.date.slice(0, 4);
       const discoveryQuery = `${req.destination} events calendar concerts festivals ${monthName} ${year}`;
       const results = await searxngProvider.searchWeb(discoveryQuery, 5);
-      const page = selectBestResult(results, req.destination);
+      const page = selectEventDiscoverySource(results, req.destination);
       if (!page) {
         trace.push({ stage: "event-discovery", status: "skipped", detail: "arama sonucu yok" });
       } else {
