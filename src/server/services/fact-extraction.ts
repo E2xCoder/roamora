@@ -297,6 +297,25 @@ const DAY_MAPS: Record<string, DayMap> = {
     cumartesi: "Sa", cmt: "Sa",
     pazar: "Su", paz: "Su",
   },
+  // Real, live-observed gap: this project's primary real-data testbed
+  // (Prague) had NO Czech day-name coverage at all, which produced a
+  // silently WRONG result, not just an unknown one — a real museum's real
+  // "Pondělí...Neděle" (Mon...Sun) hours table matched the POLISH map's
+  // "sobota" (also a real, unrelated word meaning Saturday in Polish too)
+  // as its single best match, converting a real Mon-Sun schedule into
+  // "Sa 10:00-18:00" — Saturday only. `bestDayMatches` already picks
+  // whichever language matches the MOST tokens; adding real Czech coverage
+  // fixes this via that existing mechanism (7 real Czech matches beats
+  // Polish's 1 accidental one) without changing any matching logic.
+  czech: {
+    "pondělí": "Mo", pondeli: "Mo", po: "Mo",
+    "úterý": "Tu", utery: "Tu", "út": "Tu", ut: "Tu",
+    "středa": "We", streda: "We", st: "We",
+    "čtvrtek": "Th", ctvrtek: "Th", "čt": "Th", ct: "Th",
+    "pátek": "Fr", patek: "Fr", "pá": "Fr", pa: "Fr",
+    sobota: "Sa", so: "Sa",
+    "neděle": "Su", nedele: "Su", ne: "Su",
+  },
 };
 
 function escapeRegExp(s: string): string {
@@ -358,24 +377,33 @@ function findTimeRanges(text: string): TimeRange[] {
   const ranges: TimeRange[] = [];
 
   // "09:00 - 18:00", "9:00-18:00", "9h00 à 21h00", "daily 9:00 to 22:00",
-  // "Open daily 9 to 17h" — colon or "h" delimiter, dash/"to"/"bis" separator.
-  // Each side's delimiter is independently optional (real case: "9 to 17h"
-  // has a bare "9" on one side and an "h"-marked "17h" on the other) but at
-  // least one side must carry a real time marker — requiring that is what
-  // stops a bare number range like "15-25" (a price, a page count) from
-  // ever being read as a time, which neither side of has any hour marker at
-  // all.
+  // "Open daily 9 to 17h", "10.00–18.00" — colon, "h", or period delimiter,
+  // dash/"to"/"bis" separator. The period form is a real, common European
+  // convention (real case: a Prague gallery's real hours page states
+  // "út–ne: 10.00–18.00" — Tue-Sun, 10:00-18:00 — with periods, not colons)
+  // this parser had no way to read at all. Each side's delimiter is
+  // independently optional (real case: "9 to 17h" has a bare "9" on one
+  // side and an "h"-marked "17h" on the other) but at least one side must
+  // carry a real time marker — requiring that is what stops a bare number
+  // range like "15-25" (a price, a page count) from ever being read as a
+  // time, which neither side of has any hour marker at all.
+  //
+  // Positional groups (named groups need an ES2018+ TS target this project
+  // doesn't use): 1=open hour, 2=open marker (whole alternation),
+  // 3=open colon-minutes, 4=open period-minutes, 5=open h-minutes,
+  // 6=close hour, 7=close marker, 8=close colon-minutes,
+  // 9=close period-minutes, 10=close h-minutes.
   const reColon =
-    /(\d{1,2})(:(\d{2})|h(\d{2})?)?\s*(?:-|–|—|to|bis)\s*(\d{1,2})(:(\d{2})|h(\d{2})?)?/gi;
+    /(\d{1,2})(:(\d{2})|\.(\d{2})|h(\d{2})?)?\s*(?:-|–|—|to|bis)\s*(\d{1,2})(:(\d{2})|\.(\d{2})|h(\d{2})?)?/gi;
   let m: RegExpExecArray | null;
   while ((m = reColon.exec(text))) {
     const openHasMarker = m[2] !== undefined;
-    const closeHasMarker = m[6] !== undefined;
+    const closeHasMarker = m[7] !== undefined;
     if (!openHasMarker && !closeHasMarker) continue; // neither side looks like a time — likely an unrelated number range
     const oh = Number(m[1]);
-    const om = openHasMarker ? Number(m[3] ?? m[4] ?? 0) : 0;
-    const ch = Number(m[5]);
-    const cm = closeHasMarker ? Number(m[7] ?? m[8] ?? 0) : 0;
+    const om = openHasMarker ? Number(m[3] ?? m[4] ?? m[5] ?? 0) : 0;
+    const ch = Number(m[6]);
+    const cm = closeHasMarker ? Number(m[8] ?? m[9] ?? m[10] ?? 0) : 0;
     if (oh > 23 || ch > 23 || om > 59 || cm > 59) continue;
     if (oh === ch && om === cm) continue; // "09:00-09:00" — zero-duration, malformed, not a real window
     ranges.push({ index: m.index, end: m.index + m[0].length, open: `${pad2(oh)}:${pad2(om)}`, close: `${pad2(ch)}:${pad2(cm)}` });

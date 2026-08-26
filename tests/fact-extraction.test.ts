@@ -192,6 +192,53 @@ describe("looseTextToOsmSyntax — multilingual, real extraction test cases", ()
   it("handles 12pm/12am correctly (noon and midnight, not '12:00' literally added to 12)", () => {
     expect(looseTextToOsmSyntax("12am-12pm")).toBe("Mo-Su 00:00-12:00");
   });
+
+  it(
+    "real, serious regression: a real Czech museum's real Monday-through-Sunday hours table " +
+      '("Pondělí 10:00 - 18:00, Úterý 10:00 - 18:00, ..., Neděle 10:00 - 18:00") used to silently ' +
+      "produce a WRONG result — Czech had no day-name coverage at all, so \"Sobota\" (Saturday) " +
+      'coincidentally matched the POLISH map\'s "sobota" (also Saturday, an unrelated language) ' +
+      "as the single best match, collapsing a real 7-day schedule into Saturday-only " +
+      '("Sa 10:00-18:00"). Silently wrong is worse than the string simply being unrecognised.',
+    () => {
+      const real =
+        "Pondělí 10:00 - 18:00, Úterý 10:00 - 18:00, Středa 10:00 - 18:00, Čtvrtek 10:00 - 18:00, " +
+        "Pátek 10:00 - 18:00, Sobota 10:00 - 18:00, Neděle 10:00 - 18:00";
+      expect(looseTextToOsmSyntax(real)).toBe(
+        "Mo 10:00-18:00; Tu 10:00-18:00; We 10:00-18:00; Th 10:00-18:00; Fr 10:00-18:00; Sa 10:00-18:00; Su 10:00-18:00"
+      );
+    }
+  );
+
+  it("recognizes standard Czech day abbreviations (Po/Út/St/Čt/Pá/So/Ne)", () => {
+    expect(looseTextToOsmSyntax("Po-Pá 08:00-16:00")).toBe("Mo-Fr 08:00-16:00");
+  });
+
+  it(
+    'real case: a real Prague gallery\'s real hours ("út–ne: 10.00–18.00" — Tue-Sun, period- ' +
+      "separated times, not colons) resolves correctly once both the Czech day abbreviation and " +
+      "the period time format are recognized",
+    () => {
+      expect(looseTextToOsmSyntax("út–ne: 10.00–18.00")).toBe("Tu-Su 10:00-18:00");
+    }
+  );
+
+  it("recognizes a period-separated time range in isolation (European decimal-style hours)", () => {
+    expect(looseTextToOsmSyntax("Mo-Fr 09.00-17.00")).toBe("Mo-Fr 09:00-17:00");
+  });
+
+  it(
+    "accepted tradeoff, documented rather than silent: a period is also a real, common minute " +
+      'marker ("10.00" = 10:00), so a decimal-looking number range with a day-shaped hour/minute ' +
+      "split (\"10.00-15.00\") reads as a time even with no day name around it — same as the " +
+      "existing bare-colon/'h'/AM-PM behavior for a day-less string elsewhere in this file. This " +
+      "function is only ever run on the model's own openingHoursText field, already classified as " +
+      "being about hours before this parser ever sees it — not on arbitrary page text where a real " +
+      "decimal price could plausibly collide with this shape.",
+    () => {
+      expect(looseTextToOsmSyntax("Discount 10.00-15.00 for members")).toBe("Mo-Su 10:00-15:00");
+    }
+  );
 });
 
 describe("repairTruncatedJsonArray", () => {
