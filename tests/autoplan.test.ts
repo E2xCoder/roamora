@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectEventDiscoverySource } from "@/server/services/autoplan";
+import { selectEventDiscoverySource, deriveOsmVerifiedFreePrice } from "@/server/services/autoplan";
 import type { WebSearchResult } from "@/server/providers/research/types";
 
 function result(overrides: Partial<WebSearchResult> = {}): WebSearchResult {
@@ -90,5 +90,30 @@ describe("selectEventDiscoverySource", () => {
     // Both are event-shaped; the second matches more keywords ("events" + "calendar") than the
     // first ("program" only), so it should be preferred.
     expect(selectEventDiscoverySource(results, "Prague")?.url).toBe("https://example.com/prague/events-calendar");
+  });
+});
+
+describe("deriveOsmVerifiedFreePrice", () => {
+  it(
+    'real bug fix: OSM fee="no" (community-verified free admission) used to stay reported as ' +
+      '"unverified"/unknown just because it was only ever used to SKIP price research, never to ' +
+      "surface the fact it already had — real measured result before this fix: 11 Prague " +
+      "attraction stops, 0 with any verified price/access signal, even for places OSM already " +
+      "knew were free",
+    () => {
+      expect(deriveOsmVerifiedFreePrice("no")).toEqual({ priceSource: "osm", priceConfidence: "high", estimatedCost: 0 });
+    }
+  );
+
+  it('fee="yes" (a real, likely-ticketed place — e.g. Museum Kampa, Sex Machines Museum) is not free by construction — must not be reported as verified-free', () => {
+    expect(deriveOsmVerifiedFreePrice("yes")).toBeNull();
+  });
+
+  it("no OSM fee tag at all (e.g. Staronová synagoga, Klementinum) is genuinely unknown, not free — must not guess", () => {
+    expect(deriveOsmVerifiedFreePrice(undefined)).toBeNull();
+  });
+
+  it('an unrelated fee value (e.g. "donation") is not the same fact as a confirmed "no" — must not be treated as verified-free', () => {
+    expect(deriveOsmVerifiedFreePrice("donation")).toBeNull();
   });
 });

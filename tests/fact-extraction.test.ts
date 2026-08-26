@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looseTextToOsmSyntax, htmlToPlainText, repairTruncatedJsonArray } from "@/server/services/fact-extraction";
+import { looseTextToOsmSyntax, htmlToPlainText, repairTruncatedJsonArray, extractionWindow } from "@/server/services/fact-extraction";
 
 describe("htmlToPlainText", () => {
   it("strips tags, scripts, styles and comments down to visible text", () => {
@@ -417,5 +417,54 @@ describe("repairTruncatedJsonArray", () => {
     const items = repairTruncatedJsonArray(raw, "events") as Array<{ eventName: string }>;
     expect(items).toHaveLength(1);
     expect(items[0].eventName).toBe("Festival A");
+  });
+});
+
+describe("extractionWindow", () => {
+  it("returns the whole text unchanged when it already fits inside the window", () => {
+    const plain = "Museum X. Otevírací doba: 9:00-17:00. Vstupné: 100 Kč.";
+    expect(extractionWindow(plain, "Museum X")).toBe(plain);
+  });
+
+  it(
+    "real regression: jewishmuseum.cz's own hours page is dominated by a long site-wide " +
+      'navigation menu ("Sbírky a fondy", "Textil", "Kovy a 3D předměty", ... hundreds of ' +
+      'unrelated link labels) before any mention of "Staronová synagoga" or its real, dated ' +
+      "hours table — a blind prefix window fed the model almost nothing but menu noise and " +
+      "the real answer never reached the 4000-character budget; the window must instead " +
+      "center on the place's own name once it is found well past the front of the text",
+    () => {
+      const nav = "Sbírky a fondy Textil Kovy a 3D předměty ".repeat(150); // >4000 chars of pure nav noise
+      const relevant = "STARONOVÁ SYNAGOGA otevírací doba 9:00-17:00, vstupné 250 Kč";
+      const plain = nav + relevant + " " + "more content after ".repeat(50);
+      const window = extractionWindow(plain, "Staronová synagoga");
+      expect(window).toContain("STARONOVÁ SYNAGOGA otevírací doba 9:00-17:00, vstupné 250 Kč");
+    }
+  );
+
+  it("is diacritic- and case-insensitive when locating the place's own name", () => {
+    const nav = "unrelated filler text ".repeat(200);
+    const relevant = "STARONOVA SYNAGOGA hours 9-17";
+    const plain = nav + relevant;
+    // OSM/request spelling uses the accented form; the page uses the ASCII form (or vice versa).
+    expect(extractionWindow(plain, "Staronová Synagoga")).toContain(relevant);
+  });
+
+  it("keeps a lead-in before the name so a short intro sentence right before it is not cut", () => {
+    const nav = "unrelated filler text ".repeat(200);
+    const intro = "This official page describes ";
+    const plain = nav + intro + "Staronová synagoga hours 9-17";
+    expect(extractionWindow(plain, "Staronová synagoga")).toContain(intro);
+  });
+
+  it("falls back to the original prefix window when the place's own name never appears at all", () => {
+    const plain = "front content ".repeat(50) + "the real answer is here, unnamed page" + " filler".repeat(600);
+    const window = extractionWindow(plain, "A Completely Different Place");
+    expect(window).toBe(plain.slice(0, 4000));
+  });
+
+  it("does not re-center when the name already falls within the default prefix window (avoids pointless shifting for the common, already-working case)", () => {
+    const plain = "Museum X ".repeat(50) + "filler ".repeat(600); // name appears at index 0, well inside 4000
+    expect(extractionWindow(plain, "Museum X")).toBe(plain.slice(0, 4000));
   });
 });

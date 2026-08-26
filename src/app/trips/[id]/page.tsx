@@ -257,12 +257,17 @@ function matchCategory(research: DayResearchSummary | null, placeName: string): 
 function AttractionFacts({ provenance }: { provenance: DayResearchSummary["provenance"][number] | undefined }) {
   if (!provenance) return null;
 
+  const priceVerified = provenance.priceSource !== "unverified";
   const priceLabel =
     provenance.estimatedCost == null
-      ? null
+      ? priceVerified
+        ? null
+        : "Fiyat doğrulanamadı"
       : provenance.estimatedCost === 0
-        ? "Ücretsiz"
-        : `~${provenance.estimatedCost}${provenance.priceType === "reduced" ? " (indirimli)" : provenance.priceType === "minimum" ? "+ (başlangıç fiyatı)" : ""}`;
+        ? "Ücretsiz · Doğrulandı"
+        : `~${provenance.estimatedCost}${provenance.priceCurrency ? ` ${provenance.priceCurrency}` : ""}${
+            provenance.priceType === "reduced" ? " (indirimli)" : provenance.priceType === "minimum" ? "+ (başlangıç fiyatı)" : ""
+          } · Doğrulandı`;
 
   const hoursVerified = provenance.openingHoursSource !== "unverified";
   const hoursLabel = hoursVerified
@@ -274,7 +279,7 @@ function AttractionFacts({ provenance }: { provenance: DayResearchSummary["prove
   return (
     <div className="flex items-center gap-2 flex-wrap mt-1.5 text-[11px]">
       <span className={hoursVerified ? "text-success" : "text-muted"}>{hoursLabel}</span>
-      {priceLabel && <span className="text-muted-fg">· {priceLabel}</span>}
+      {priceLabel && <span className={priceVerified ? "text-success" : "text-muted-fg"}>· {priceLabel}</span>}
       {provenance.sourceType === "official" && provenance.officialDomain && (
         <span className="text-muted">· Kaynak: {provenance.officialDomain}</span>
       )}
@@ -331,6 +336,7 @@ function TimelineItem({
                 <p className="text-[11px] text-muted">
                   Rotadan {Math.round(hiddenGem.distanceMeters)} m sapma — {hiddenGem.category}
                 </p>
+                <AttractionFacts provenance={provenance} />
               </div>
             ) : (
               <>

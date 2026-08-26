@@ -34,9 +34,10 @@ export interface StopProvenance {
   category: string;
   openingHoursSource: "osm" | "web-research" | "unverified";
   openingHoursConfidence: "high" | "medium" | "low" | "unknown";
-  priceSource: "web-research" | "unverified";
+  priceSource: "osm" | "web-research" | "unverified";
   priceConfidence: "high" | "medium" | "low" | "unknown";
   priceType?: "standard" | "minimum" | "reduced";
+  priceCurrency?: string;
   sourceType?: "official" | "secondary" | "unverified";
   officialDomain?: string;
   summarySource: "wikipedia" | "none";

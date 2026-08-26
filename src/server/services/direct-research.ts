@@ -73,7 +73,7 @@ export async function resolveResearchSource(
   if (official) {
     metrics.officialDomainResolved = true;
     metrics.officialPageAttempted = true;
-    const factPage = await fetchFactPage(official.officialUrl, factType);
+    const factPage = await fetchFactPage(official.officialUrl, factType, placeName);
     if (factPage) {
       metrics.officialPageResolved = true;
       metrics.searchQueryAvoided = true;

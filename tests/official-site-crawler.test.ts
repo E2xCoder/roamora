@@ -5,6 +5,7 @@ import {
   parseRobotsDisallow,
   isPathAllowed,
   checkPageContent,
+  pageRelatesToPlace,
 } from "@/server/services/official-site-crawler";
 
 function link(url: string, text = "") {
@@ -24,14 +25,18 @@ describe("extractSameDomainLinks", () => {
     expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([link("https://example.com/hours", "Hours")]);
   });
 
-  it("deduplicates identical resolved URLs", () => {
+  it("deduplicates identical resolved URLs to one entry, merging their distinct anchor text", () => {
     const html = `<a href="/menu">Menu</a><a href="/menu">Menu again</a>`;
-    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([link("https://example.com/menu", "Menu")]);
+    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([
+      link("https://example.com/menu", "Menu Menu again"),
+    ]);
   });
 
-  it("strips the fragment when deduplicating (same page, different anchor)", () => {
+  it("strips the fragment when deduplicating (same page, different anchor), merging distinct anchor text", () => {
     const html = `<a href="/menu#top">Menu</a><a href="/menu#bottom">Menu again</a>`;
-    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([link("https://example.com/menu", "Menu")]);
+    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([
+      link("https://example.com/menu", "Menu Menu again"),
+    ]);
   });
 
   it("ignores mailto:, tel:, and javascript: links", () => {
@@ -85,6 +90,38 @@ describe("extractSameDomainLinks", () => {
     expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([
       link("https://example.com/hours", "Opening Hours"),
     ]);
+  });
+
+  it(
+    "real regression: merges anchor text from multiple links that share the same base URL but " +
+      "different #fragments, instead of discarding all but the first — real case: " +
+      'museumkampa.cz has FOUR real links all resolving to "/navsteva/" once the fragment is ' +
+      'stripped for fetching ("#oteviraci-doba", "#vstupne", "#adresa", "#kontakty"), each with ' +
+      "genuinely different anchor text; keeping only the first discarded the word (\"vstupné\") " +
+      "this page's real admission price is actually found by",
+    () => {
+      const html =
+        `<a href="/navsteva/#oteviraci-doba">otevírací doba</a>` +
+        `<a href="/navsteva/#vstupne">vstupné</a>` +
+        `<a href="/navsteva/#adresa">adresa</a>`;
+      const result = extractSameDomainLinks(html, "https://www.museumkampa.cz/");
+      expect(result).toHaveLength(1);
+      expect(result[0].url).toBe("https://www.museumkampa.cz/navsteva/");
+      expect(result[0].text).toBe("otevírací doba vstupné adresa");
+    }
+  );
+
+  it("does not duplicate identical text when merging (e.g. the same link repeated verbatim)", () => {
+    const html = `<a href="/menu#top">Menu</a><a href="/menu#bottom">Menu</a>`;
+    const result = extractSameDomainLinks(html, "https://example.com/");
+    expect(result).toEqual([link("https://example.com/menu", "Menu")]);
+  });
+
+  it("preserves the FIRST-seen URL's position in the output order, even after later merges", () => {
+    const html = `<a href="/a#1">first</a><a href="/b">second</a><a href="/a#2">merged</a>`;
+    const result = extractSameDomainLinks(html, "https://example.com/");
+    expect(result.map((l) => l.url)).toEqual(["https://example.com/a", "https://example.com/b"]);
+    expect(result[0].text).toBe("first merged");
   });
 });
 
@@ -169,6 +206,93 @@ describe("scoreLinkForFactType", () => {
 
   it("does not let a Czech hours term leak into an unrelated fact type", () => {
     expect(scoreLinkForFactType("https://www.nm.cz/navstivte-nas/oteviraci-doba", "Otevírací doba", "menu")).toBe(0);
+  });
+
+  it(
+    'real case: matches the Czech admission-price term "ceník" (jewishmuseum.cz\'s real URL ' +
+      '"/cenik-sluzeb/") — genuinely distinct from the Polish "cennik" already covered above',
+    () => {
+      expect(scoreLinkForFactType("https://www.jewishmuseum.cz/cenik-sluzeb", "", "price")).toBeGreaterThan(0);
+    }
+  );
+
+  it(
+    'real case: matches "ceny" in merged anchor text (museumkampa.cz\'s real merged nav text ' +
+      'includes "ceny vstupného")',
+    () => {
+      expect(
+        scoreLinkForFactType("https://www.museumkampa.cz/navsteva/", "otevírací doba vstupné ceny vstupného", "price")
+      ).toBeGreaterThan(0);
+    }
+  );
+
+  it(
+    "real regression: excludes an e-shop/checkout page from 'price' scoring entirely, even " +
+      'when its own text/URL also matches a real price keyword — real case: jewishmuseum.cz\'s ' +
+      '"/e-shop/" page is labelled "VSTUPENKY" (tickets are bought there) but is a purchase ' +
+      "flow, not the real admission-price information page, which lives at a completely " +
+      'different URL ("/informace/.../vstupne/")',
+    () => {
+      expect(scoreLinkForFactType("https://www.jewishmuseum.cz/e-shop", "VSTUPENKY", "price")).toBe(0);
+      expect(
+        scoreLinkForFactType(
+          "https://www.jewishmuseum.cz/informace/navstivte-nas-rozcestnik/vstupne/",
+          "Vstupné",
+          "price"
+        )
+      ).toBeGreaterThan(0);
+    }
+  );
+
+  it("excludes other real shop/checkout URL shapes from 'price' scoring (English, generic)", () => {
+    expect(scoreLinkForFactType("https://example.com/webshop/tickets", "Tickets", "price")).toBe(0);
+    expect(scoreLinkForFactType("https://example.com/checkout", "Buy tickets", "price")).toBe(0);
+  });
+
+  it("does not exclude a shop-marked URL from an UNRELATED fact type (the exclusion is price-only)", () => {
+    expect(scoreLinkForFactType("https://example.com/e-shop/opening-hours", "Hours", "hours")).toBeGreaterThan(0);
+  });
+
+  it("does not falsely treat an unrelated subdomain/hostname mention of 'shop' as a shop page (path-only check)", () => {
+    // Real, already-existing test above: "eshop.example.cz" in the HOSTNAME must not affect
+    // path-based price scoring — the exclusion only inspects the URL's pathname, not its host.
+    expect(scoreLinkForFactType("https://eshop.example.cz/vstupenky", "", "price")).toBeGreaterThan(0);
+  });
+});
+
+describe("pageRelatesToPlace", () => {
+  it(
+    "real regression: rejects a real, live-observed hijacked domain — a real Prague landmark's " +
+      "OSM `website` tag resolved to a completely unrelated forex/SEO blog with zero mention of " +
+      "the landmark anywhere on the page",
+    () => {
+      const html = `<html><head><title>My Blog - My WordPress Blog</title></head>
+        <body>Best Forex SEO Agencies for Multilingual and International Markets...</body></html>`;
+      expect(pageRelatesToPlace(html, "Klementinum")).toBe(false);
+    }
+  );
+
+  it("accepts a real page that genuinely mentions the place", () => {
+    const html = `<html><body><h1>Klementinum - Prague</h1><p>Visit the historic Klementinum complex.</p></body></html>`;
+    expect(pageRelatesToPlace(html, "Klementinum")).toBe(true);
+  });
+
+  it("is diacritic-insensitive, same discipline as the rest of this module", () => {
+    const html = `<html><body>Vítejte v Národním muzeu</body></html>`;
+    expect(pageRelatesToPlace(html, "Národní muzeum")).toBe(true);
+  });
+
+  it("does not get fooled by the domain name alone appearing only inside stripped markup (meta/canonical tags)", () => {
+    const html =
+      `<html><head>` +
+      `<link rel="canonical" href="https://klementinum.com/">` +
+      `<meta property="og:url" content="https://klementinum.com/">` +
+      `</head><body>My Blog - My WordPress Blog. Unrelated content about forex SEO agencies.</body></html>`;
+    expect(pageRelatesToPlace(html, "Klementinum")).toBe(false);
+  });
+
+  it("skips the check (returns true) for a name with no token 3+ characters long", () => {
+    expect(pageRelatesToPlace("<html><body>Anything</body></html>", "A B")).toBe(true);
   });
 });
 

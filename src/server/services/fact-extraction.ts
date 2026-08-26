@@ -60,6 +60,42 @@ export function htmlToPlainText(html: string): string {
     .trim();
 }
 
+const WINDOW_SIZE = 4000;
+
+function foldDiacritics(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+/**
+ * Picks which 4000-character slice of a page's plain text to send the model.
+ * A blind prefix (the previous, simpler behavior) breaks on the same class
+ * of real page that motivated converting to plain text before truncating in
+ * the first place — a large site-wide navigation menu sitting BEFORE the
+ * actual content still pushes the answer out of a fixed prefix window even
+ * once boilerplate tags are stripped. Confirmed live: jewishmuseum.cz's own
+ * "otevírací doba" page is ~57% pure nav-link text (hundreds of unrelated
+ * menu items — "Sbírky a fondy", "Textil", "Kovy a 3D předměty", ...) before
+ * "Staronová synagoga" and its real, dated hours table even appear, around
+ * character 2750 — well inside a 4000-char budget, but sharing it with over
+ * 2000 characters of irrelevant menu noise that diluted the model's
+ * "aboutThisPlace" judgment and hours extraction.
+ *
+ * When the place's own name is found later in the text, the window is
+ * centered on that first mention instead — a fixed lead-in (not the exact
+ * midpoint) so text describing the place that appears just before its own
+ * name (a heading, a short intro sentence) is still included. If the name
+ * never appears at all, this falls back to the original prefix window
+ * unchanged — there is no better anchor to center on, and guessing one
+ * would risk cutting a real answer that happened to be near the start.
+ */
+export function extractionWindow(plain: string, placeName: string): string {
+  if (plain.length <= WINDOW_SIZE) return plain;
+  const idx = foldDiacritics(plain).indexOf(foldDiacritics(placeName));
+  if (idx < 0 || idx <= WINDOW_SIZE - 1000) return plain.slice(0, WINDOW_SIZE);
+  const start = Math.max(0, idx - 1000);
+  return plain.slice(start, start + WINDOW_SIZE);
+}
+
 /**
  * How the source text stated its hours — asked for explicitly rather than
  * inferred from the absence of a day name in `openingHoursText`.
@@ -153,7 +189,8 @@ export async function extractFactsFromText(
     );
   }
 
-  const trimmed = htmlToPlainText(pageText).slice(0, 4000).trim();
+  const plain = htmlToPlainText(pageText);
+  const trimmed = extractionWindow(plain, placeName).trim();
   if (!trimmed) return null;
 
   const prompt = `You are reading a web page about travel destinations. Find facts specifically about this place: "${placeName}".

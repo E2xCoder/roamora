@@ -137,10 +137,13 @@ export interface StopProvenance {
   category: string;
   openingHoursSource: "osm" | "web-research" | "unverified";
   openingHoursConfidence: ConfidenceLevel;
-  priceSource: "web-research" | "unverified";
+  /** "osm" means a community-maintained fee=no tag, not extracted text — same high-trust tier as openingHoursSource's "osm". */
+  priceSource: "osm" | "web-research" | "unverified";
   priceConfidence: ConfidenceLevel;
   /** Set only when priceSource is "web-research" — a "minimum"/"reduced" price is real and textually-supported, but not what a typical traveller pays. */
   priceType?: "standard" | "minimum" | "reduced";
+  /** The real currency the price was quoted in (e.g. "CZK"), only when priceSource is "web-research" — never assumed to match the trip's req.currency. */
+  priceCurrency?: string;
   /** Which research tier actually supplied the web-research facts above — "official" means fetched directly from the place's own resolved domain, never via a generic search query. */
   sourceType?: "official" | "secondary" | "unverified";
   /** Set only when sourceType is "official" — the resolved official domain, e.g. "rijksmuseum.nl". */
@@ -326,6 +329,22 @@ export function selectEventDiscoverySource(
     .filter((c) => c.score > 0)
     .sort((a, b) => b.score - a.score);
   return eventShaped[0]?.r ?? selectBestResult(relevant, destination, destinationAliases);
+}
+
+/**
+ * A community-maintained OSM `fee=no` tag is already a verified fact — same
+ * trust tier `openingHoursSource` gives a structured `opening_hours` tag —
+ * so it is surfaced as a real "verified free" result rather than left
+ * `unverified` just because no web research ever ran for it (real bug: 0/11
+ * Prague attractions showed any price signal even for places OSM already
+ * knew were free, since `needsPriceResearch` only used `fee=no` to SKIP
+ * research, never to report the fact it already had).
+ */
+export function deriveOsmVerifiedFreePrice(
+  fee: string | undefined
+): { priceSource: "osm"; priceConfidence: "high"; estimatedCost: 0 } | null {
+  if (fee !== "no") return null;
+  return { priceSource: "osm", priceConfidence: "high", estimatedCost: 0 };
 }
 
 function addMinutes(hhmm: string, minutes: number): string {
@@ -571,7 +590,15 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
     let priceSource: StopProvenance["priceSource"] = "unverified";
     let priceConfidence: StopProvenance["priceConfidence"] = "unknown";
     let priceType: StopProvenance["priceType"];
+    let priceCurrency: string | undefined;
     let estimatedCost: number | undefined;
+
+    const osmFreePrice = deriveOsmVerifiedFreePrice(p.tags.fee);
+    if (osmFreePrice) {
+      priceSource = osmFreePrice.priceSource;
+      priceConfidence = osmFreePrice.priceConfidence;
+      estimatedCost = osmFreePrice.estimatedCost;
+    }
 
     // Web research only for gaps OSM left, and only up to a hard call budget.
     const needsHoursResearch = !osmHours && searchAvailable && aiAvailable;
@@ -683,6 +710,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
               const priceTypeAmbiguous = priceGuardResult.status !== "valid";
               estimatedCost = priceGuardResult.amount;
               priceType = priceGuardResult.status === "valid" ? "standard" : priceGuardResult.status === "valid-minimum" ? "minimum" : "reduced";
+              priceCurrency = priceGuardResult.currency ?? undefined;
               priceSource = "web-research";
               priceConfidence = scoreConfidence({
                 textuallySupported: true, // the guard already required this to reach a non-"unknown" status
@@ -691,6 +719,64 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
                 stale,
                 multiSourceAgreement: null, // price cross-checking is not implemented — one extra fetch per fact would double the already-bounded research budget
               });
+            }
+
+            // Real bug (measured: 11 Prague attractions, 0 verified prices):
+            // the fetch above was prioritized for "hours" whenever hours were
+            // still unknown — the common case, since most candidates lack an
+            // OSM opening_hours tag — so needsPriceResearch was starved by
+            // needsHoursResearch for nearly every candidate that needed both.
+            // The "one fetch answers both" assumption above only holds when
+            // a site keeps hours and price on the same page; when they're
+            // separate, price never got its own discovery attempt at all.
+            // A second, price-targeted fetch is spent only where it is
+            // actually likely to pay off — an official domain is already
+            // resolved (cached, so this costs one real page fetch, not a
+            // fresh domain search) and the budget allows one more call —
+            // rather than raising MAX_WEB_RESEARCH_CALLS globally, which
+            // would also spend calls on candidates unlikely to have a fact
+            // to find at all (e.g. free outdoor monuments, already excluded
+            // by needsPriceResearch above).
+            if (
+              needsHoursResearch &&
+              needsPriceResearch &&
+              priceSource !== "web-research" &&
+              priceSource !== "osm" &&
+              official &&
+              webResearchAttempts < MAX_WEB_RESEARCH_CALLS
+            ) {
+              webResearchAttempts++;
+              const priceRetry = await resolveResearchSource(
+                p.name,
+                req.destination,
+                p.tags,
+                "price",
+                `"${p.name}" ${req.destination} official price ticket`,
+                searchAvailable
+              );
+              officialSourceMetrics.pageAttempted += priceRetry.metrics.officialPageAttempted ? 1 : 0;
+              officialSourceMetrics.pageResolved += priceRetry.metrics.officialPageResolved ? 1 : 0;
+              if (priceRetry.source && priceRetry.source.url !== source.url) {
+                const retryText = htmlToPlainText(priceRetry.source.text);
+                const retryFacts = await extractFactsFromText(p.name, priceRetry.source.text);
+                if (retryFacts) {
+                  const retryGuard = validateExtractedPrice(retryFacts.facts.priceAmount, retryFacts.facts.priceCurrency, retryText);
+                  if (retryGuard.status !== "unknown") {
+                    const retryAmbiguous = retryGuard.status !== "valid";
+                    estimatedCost = retryGuard.amount;
+                    priceType = retryGuard.status === "valid" ? "standard" : retryGuard.status === "valid-minimum" ? "minimum" : "reduced";
+                    priceCurrency = retryGuard.currency ?? undefined;
+                    priceSource = "web-research";
+                    priceConfidence = scoreConfidence({
+                      textuallySupported: true,
+                      officialSource: priceRetry.source.official,
+                      extractionAmbiguous: retryAmbiguous || retryFacts.facts.priceCurrency == null,
+                      stale: detectStaleness(retryText),
+                      multiSourceAgreement: null,
+                    });
+                  }
+                }
+              }
             }
           }
         }
@@ -746,6 +832,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       priceSource,
       priceConfidence,
       priceType,
+      priceCurrency,
       sourceType: sourceTypeUsed,
       officialDomain: officialDomainUsed,
       summarySource,
@@ -1221,8 +1308,8 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
         category: finding.candidate.category,
         openingHoursSource: osmHours && earliestTime ? "osm" : "unverified",
         openingHoursConfidence: osmHours && earliestTime ? "high" : "unknown",
-        priceSource: "unverified",
-        priceConfidence: "unknown",
+        priceSource: deriveOsmVerifiedFreePrice(p.tags.fee)?.priceSource ?? "unverified",
+        priceConfidence: deriveOsmVerifiedFreePrice(p.tags.fee)?.priceConfidence ?? "unknown",
         summarySource: gemSummarySource,
         summaryText: gemSummaryText,
         summaryUrl: gemSummaryUrl,
