@@ -239,6 +239,65 @@ describe("looseTextToOsmSyntax — multilingual, real extraction test cases", ()
       expect(looseTextToOsmSyntax("Discount 10.00-15.00 for members")).toBe("Mo-Su 10:00-15:00");
     }
   );
+
+  it(
+    "real regression: Muzeum Karla Zemana's real Czech prose hours — a day range and a time " +
+      'range both using the word "do" ("to") as their connector instead of a dash — resolves ' +
+      'correctly ("pondělí do neděle od 10:00 do 19:00")',
+    () => {
+      expect(looseTextToOsmSyntax("pondělí do neděle od 10:00 do 19:00")).toBe("Mo-Su 10:00-19:00");
+    }
+  );
+
+  it(
+    'real-shaped case: a day range ending in a day whose Czech genitive form differs from its ' +
+      'nominative ("pátek" -> "pátku" after "do") — "pondělí do pátku od 09:00 do 17:00"',
+    () => {
+      expect(looseTextToOsmSyntax("pondělí do pátku od 09:00 do 17:00")).toBe("Mo-Fr 09:00-17:00");
+    }
+  );
+
+  it("handles mixed Czech day abbreviations with the word connector (not just full names)", () => {
+    expect(looseTextToOsmSyntax("Po do Pá od 09:00 do 17:00")).toBe("Mo-Fr 09:00-17:00");
+    expect(looseTextToOsmSyntax("út do pá 10:00 do 20:00")).toBe("Tu-Fr 10:00-20:00");
+  });
+
+  it(
+    "known, accepted limitation: a Czech abbreviation pair that BOTH happen to double-collide " +
+      'with German abbreviations ("so" is also Sonntag/Sunday in German, on top of "do" already ' +
+      "being Donnerstag/Thursday) can tie on distinct-day-code count too — this stays honestly " +
+      "unknown rather than guessing between two equally-plausible readings; no real Prague page " +
+      "has been observed producing this specific double collision",
+    () => {
+      expect(looseTextToOsmSyntax("út do so 10:00 do 20:00")).toBeNull();
+    }
+  );
+
+  it("still supports the existing dash-based Czech range alongside the new word-connector form", () => {
+    expect(looseTextToOsmSyntax("Pondělí-Pátek 09:00-17:00")).toBe("Mo-Fr 09:00-17:00");
+  });
+
+  it(
+    "does not merge across 'do' when it is not standing alone between two day names — real " +
+      "guard against unrelated prose, not just a happy-path check",
+    () => {
+      // "do otevření" ("until opening") is unrelated filler between the two day mentions, not a
+      // clean day-range connector — the exact-match requirement in isPureConnector must reject it.
+      expect(looseTextToOsmSyntax("pondělí do otevření neděle 10:00-19:00")).toBeNull();
+    }
+  );
+
+  it("leaves a genuinely ambiguous, non-hours Czech sentence unknown rather than guessing", () => {
+    expect(looseTextToOsmSyntax("Muzeum je otevřeno téměř denně, volejte prosím předem")).toBeNull();
+  });
+
+  it("does not regress existing English/German/Polish word-connector-free behavior", () => {
+    expect(looseTextToOsmSyntax("Mon-Fri 9:00-17:00")).toBe("Mo-Fr 09:00-17:00");
+    expect(looseTextToOsmSyntax("9 bis 17 Uhr")).toBe("Mo-Su 09:00-17:00");
+    expect(looseTextToOsmSyntax("Wt. - Pt.: 9:00 - 18:00 So. - Nd.: 10:00 - 19:00")).toBe(
+      "Tu-Fr 09:00-18:00; Sa-Su 10:00-19:00"
+    );
+  });
 });
 
 describe("repairTruncatedJsonArray", () => {

@@ -310,10 +310,20 @@ const DAY_MAPS: Record<string, DayMap> = {
   czech: {
     "pondělí": "Mo", pondeli: "Mo", po: "Mo",
     "úterý": "Tu", utery: "Tu", "út": "Tu", ut: "Tu",
-    "středa": "We", streda: "We", st: "We",
-    "čtvrtek": "Th", ctvrtek: "Th", "čt": "Th", ct: "Th",
-    "pátek": "Fr", patek: "Fr", "pá": "Fr", pa: "Fr",
-    sobota: "Sa", so: "Sa",
+    // Czech is a declined language, and "do" (used as a day-range connector,
+    // e.g. "pondělí do pátku") grammatically requires the GENITIVE case —
+    // three of the seven day names change form there, not just case: real
+    // case, "pondělí do pátku" ("Monday to Friday") uses "pátku", the
+    // genitive of "pátek", never the nominative form itself. Adding the
+    // genitive as one more surface form (same OSM code) needs no change to
+    // the matching logic, same as this table already lists multiple real
+    // spellings per day elsewhere (nominative "středa" alongside genitive
+    // "středy", etc.). Abbreviations are not declined in real usage, so
+    // they need no genitive counterpart.
+    "středa": "We", streda: "We", "středy": "We", stredy: "We", st: "We",
+    "čtvrtek": "Th", ctvrtek: "Th", "čtvrtka": "Th", ctvrtka: "Th", "čt": "Th", ct: "Th",
+    "pátek": "Fr", patek: "Fr", "pátku": "Fr", patku: "Fr", "pá": "Fr", pa: "Fr",
+    sobota: "Sa", "soboty": "Sa", so: "Sa",
     "neděle": "Su", nedele: "Su", ne: "Su",
   },
 };
@@ -340,12 +350,30 @@ function findDayMatches(text: string, dayMap: DayMap): DayMatch[] {
   return matches;
 }
 
-/** Picks whichever language's day-name table matches the most tokens in the string. */
+/**
+ * Picks whichever language's day-name table explains the most DISTINCT days
+ * in the string — not just the most raw token matches. Real, live-caught
+ * collision this distinction fixes: German's existing "do" (Donnerstag)
+ * abbreviation is also exactly the Czech preposition "do" ("to") used as a
+ * day-range/time-range connector (see isPureConnector and reColon above) —
+ * a real Czech sentence like "pondělí do neděle od 10:00 do 19:00" contains
+ * "do" TWICE, which German's table happily "matches" as Thursday twice,
+ * tying Czech's two genuinely different day names (Mo, Su) on raw count.
+ * Two repeated matches of the SAME day is a much weaker signal than two
+ * matches of DIFFERENT days — a real day range or list overwhelmingly names
+ * more than one distinct day, while a same-word collision like this one
+ * doesn't. Ties broken by raw count as a secondary signal, same as before.
+ */
 function bestDayMatches(text: string): DayMatch[] {
   let best: DayMatch[] = [];
+  let bestDistinct = 0;
   for (const lang of Object.keys(DAY_MAPS)) {
     const matches = findDayMatches(text, DAY_MAPS[lang]);
-    if (matches.length > best.length) best = matches;
+    const distinct = new Set(matches.map((m) => m.code)).size;
+    if (distinct > bestDistinct || (distinct === bestDistinct && matches.length > best.length)) {
+      best = matches;
+      bestDistinct = distinct;
+    }
   }
   return best;
 }
@@ -377,16 +405,21 @@ function findTimeRanges(text: string): TimeRange[] {
   const ranges: TimeRange[] = [];
 
   // "09:00 - 18:00", "9:00-18:00", "9h00 à 21h00", "daily 9:00 to 22:00",
-  // "Open daily 9 to 17h", "10.00–18.00" — colon, "h", or period delimiter,
-  // dash/"to"/"bis" separator. The period form is a real, common European
-  // convention (real case: a Prague gallery's real hours page states
-  // "út–ne: 10.00–18.00" — Tue-Sun, 10:00-18:00 — with periods, not colons)
-  // this parser had no way to read at all. Each side's delimiter is
-  // independently optional (real case: "9 to 17h" has a bare "9" on one
-  // side and an "h"-marked "17h" on the other) but at least one side must
-  // carry a real time marker — requiring that is what stops a bare number
-  // range like "15-25" (a price, a page count) from ever being read as a
-  // time, which neither side of has any hour marker at all.
+  // "Open daily 9 to 17h", "10.00–18.00", "od 10:00 do 19:00" — colon, "h",
+  // or period delimiter, dash/"to"/"bis"/"do" separator. The period form is
+  // a real, common European convention (real case: a Prague gallery's real
+  // hours page states "út–ne: 10.00–18.00" — Tue-Sun, 10:00-18:00 — with
+  // periods, not colons). The Czech "od ... do ..." ("from ... to ...")
+  // prose form is a real, common phrasing (real case: "pondělí do neděle od
+  // 10:00 do 19:00" — Muzeum Karla Zemana's real hours) — the leading "od"
+  // needs no special handling (it simply sits before the match, same as any
+  // other prose this regex already ignores), only "do" needs adding as a
+  // valid separator alongside the existing word/dash forms. Each side's
+  // delimiter is independently optional (real case: "9 to 17h" has a bare
+  // "9" on one side and an "h"-marked "17h" on the other) but at least one
+  // side must carry a real time marker — requiring that is what stops a
+  // bare number range like "15-25" (a price, a page count) from ever being
+  // read as a time, which neither side of has any hour marker at all.
   //
   // Positional groups (named groups need an ES2018+ TS target this project
   // doesn't use): 1=open hour, 2=open marker (whole alternation),
@@ -394,7 +427,7 @@ function findTimeRanges(text: string): TimeRange[] {
   // 6=close hour, 7=close marker, 8=close colon-minutes,
   // 9=close period-minutes, 10=close h-minutes.
   const reColon =
-    /(\d{1,2})(:(\d{2})|\.(\d{2})|h(\d{2})?)?\s*(?:-|–|—|to|bis)\s*(\d{1,2})(:(\d{2})|\.(\d{2})|h(\d{2})?)?/gi;
+    /(\d{1,2})(:(\d{2})|\.(\d{2})|h(\d{2})?)?\s*(?:-|–|—|to|bis|do)\s*(\d{1,2})(:(\d{2})|\.(\d{2})|h(\d{2})?)?/gi;
   let m: RegExpExecArray | null;
   while ((m = reColon.exec(text))) {
     const openHasMarker = m[2] !== undefined;
@@ -456,8 +489,16 @@ function to24Hour(hour12: number, ampm: string): number {
 }
 
 /**
- * Only a dash (optionally with surrounding whitespace/periods) between two
- * day names — safe to merge into one range, e.g. "Wt. - Pt." -> "Tu-Fr".
+ * Only a dash (optionally with surrounding whitespace/periods), or the
+ * Czech word "do" ("to") standing completely alone, between two day names —
+ * safe to merge into one range, e.g. "Wt. - Pt." -> "Tu-Fr", or the real
+ * Czech prose form "pondělí do pátku" -> "Mo-Fr". "do" is only ever
+ * evaluated in this exact position — the whole substring between two
+ * already-recognized day-name matches with nothing else in it — so it can
+ * never be confused with the same word appearing as unrelated prose
+ * elsewhere in the sentence; anything beyond that one word (leading or
+ * trailing text, another clause) fails the exact match and is correctly
+ * left unmerged, same failure direction as the dash case below.
  *
  * Deliberately does NOT treat a comma or a word like "and" as mergeable: a
  * comma-separated day *list* ("Mo, We, Fr") means exactly those three days,
@@ -465,11 +506,12 @@ function to24Hour(hour12: number, ampm: string): number {
  * across a comma or "and" would silently turn a list into a wrong range.
  * That case is genuinely unhandled (no comma-list evidence in the real
  * pages this was built against) — a day group whose neighbour isn't a plain
- * dash simply won't merge, which surfaces as a rejected result rather than
- * a guessed one, matching the rest of this function's failure direction.
+ * dash or "do" simply won't merge, which surfaces as a rejected result
+ * rather than a guessed one, matching the rest of this function's failure
+ * direction.
  */
 function isPureConnector(s: string): boolean {
-  return /^[\s.]*[-–—][\s.]*$/.test(s);
+  return /^[\s.]*[-–—][\s.]*$/.test(s) || /^\s*do\s*$/i.test(s);
 }
 
 const OSM_DAY_ORDER: OsmDay[] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
