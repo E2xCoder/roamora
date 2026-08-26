@@ -300,6 +300,83 @@ describe("looseTextToOsmSyntax — multilingual, real extraction test cases", ()
   });
 });
 
+describe("looseTextToOsmSyntax — inherited closing-time-only exceptions", () => {
+  it(
+    "real regression: muzeumprahy.cz's real hours state a general Tue-Sun rule, then a " +
+      'Thursday exception with ONLY a closing time ("Úterý–neděle 10.00–18.00, čtvrtek do ' +
+      '20.00 hod.") — Thursday deterministically inherits the general rule\'s 10:00 opening ' +
+      "time, since it is the one and only rule already covering Thursday",
+    () => {
+      expect(looseTextToOsmSyntax("Úterý–neděle 10.00–18.00, čtvrtek do 20.00 hod.")).toBe(
+        "Tu-Su 10:00-18:00; Th 10:00-20:00"
+      );
+    }
+  );
+
+  it("supports the same inherited-exception shape in English/German phrasing", () => {
+    expect(looseTextToOsmSyntax("Tue-Sun 10:00-18:00, Thursday until 20:00")).toBe(
+      "Tu-Su 10:00-18:00; Th 10:00-20:00"
+    );
+    expect(looseTextToOsmSyntax("Di-So 10:00-18:00, Do bis 20:00 Uhr")).toBe("Tu-Su 10:00-18:00; Th 10:00-20:00");
+  });
+
+  it(
+    "does NOT inherit when the exception day is not covered by any earlier rule — nothing to " +
+      'inherit from, so this stays unknown rather than guessing ("So" is not in "Po-Pá")',
+    () => {
+      expect(looseTextToOsmSyntax("Po-Pá 09:00-17:00, So do 14:00")).toBeNull();
+    }
+  );
+
+  it(
+    "does NOT inherit when the exception day is covered by TWO different earlier rules with " +
+      'DIFFERENT opening times — genuinely ambiguous which one "Pá" should inherit from ' +
+      '("Pá" appears in both "Po-Pá" [09:00] and "St-Ne" [07:00])',
+    () => {
+      expect(looseTextToOsmSyntax("Po-Pá 09:00-17:00, St-Ne 07:00-11:00, Pá do 20:00")).toBeNull();
+    }
+  );
+
+  it("does not inherit from a LATER rule — only already-resolved, earlier rules are eligible candidates", () => {
+    // "čtvrtek do 20:00" appears before any rule that could cover Thursday — nothing to inherit yet.
+    expect(looseTextToOsmSyntax("čtvrtek do 20:00, Úterý–neděle 10:00-18:00")).toBeNull();
+  });
+
+  it("refuses an inherited pairing that would produce a zero/negative-length window", () => {
+    // The general rule opens at 20:00 — a Thursday "until 08:00" inheriting that open time would
+    // close before it opens. Refused rather than emitted as a nonsensical window.
+    expect(looseTextToOsmSyntax("Úterý–neděle 20:00-23:00, čtvrtek do 08:00")).toBeNull();
+  });
+
+  it(
+    "does not treat unrelated prose after 'do' as a closing-time exception — no digit at all " +
+      'means this is not confidently a time ("do večera" = "until evening")',
+    () => {
+      expect(looseTextToOsmSyntax("Úterý–neděle 10:00-18:00, čtvrtek do večera")).toBeNull();
+    }
+  );
+
+  it(
+    "does not treat a closing-time exception as valid when other text sits between the day " +
+      "and the 'do' clause — only an immediately-adjacent exception is trusted",
+    () => {
+      expect(looseTextToOsmSyntax("Úterý–neděle 10:00-18:00, čtvrtek je otevřeno do 20:00")).toBeNull();
+    }
+  );
+
+  it("leaves a genuinely ambiguous Czech sentence with a stray 'do' unknown, not guessed", () => {
+    expect(looseTextToOsmSyntax("Muzeum je otevřeno téměř denně, volejte prosím do 18:00")).toBeNull();
+  });
+
+  it("does not regress a normal, fully-stated multi-rule schedule with no inheritance involved", () => {
+    expect(looseTextToOsmSyntax("Mo-Fr 09:00-17:00, Sa 10:00-14:00")).toBe("Mo-Fr 09:00-17:00; Sa 10:00-14:00");
+  });
+
+  it("still rejects a genuine contradiction between two fully-stated (non-inherited) rules for the same day", () => {
+    expect(looseTextToOsmSyntax("Mo-Fr 09:00-17:00, Mo 10:00-14:00")).toBeNull();
+  });
+});
+
 describe("repairTruncatedJsonArray", () => {
   it(
     "real case: salvages complete items from a response cut off mid-array (a real llama3.1:8b " +

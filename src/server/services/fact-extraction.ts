@@ -540,10 +540,21 @@ function expandDaySpec(spec: string): OsmDay[] {
  * schedules on the same calendar day); it is a sign the extraction merged
  * text from two unrelated parts of the page. A contradictory constraint fed
  * to the optimizer is worse than a missing one.
+ *
+ * `inherited` parts are exempt: findInheritedClosingTime only ever produces
+ * one by finding EXACTLY ONE earlier rule whose day-set already contains
+ * the exception's day(s), and deliberately re-uses that rule's own opening
+ * time — the two entries differing in stated hours for the same day is not
+ * a merge artifact here, it is the whole, intentional point (Thursday
+ * really does close later than the general rule; that is what "inherited"
+ * means). It already went through its own, narrower uniqueness check at
+ * creation time; re-running this broader, unrelated-text-focused check
+ * against it would reject the exact real case this feature exists for.
  */
-function hasContradiction(parts: Array<{ spec: string; open: string; close: string }>): boolean {
+function hasContradiction(parts: Array<{ spec: string; open: string; close: string; inherited?: boolean }>): boolean {
   const seen = new Map<OsmDay, string>();
   for (const part of parts) {
+    if (part.inherited) continue;
     for (const day of expandDaySpec(part.spec)) {
       const key = `${part.open}-${part.close}`;
       const existing = seen.get(day);
@@ -552,6 +563,62 @@ function hasContradiction(parts: Array<{ spec: string; open: string; close: stri
     }
   }
   return false;
+}
+
+/**
+ * Recognizes a closing-time-ONLY exception clause — "do 20:00" / "until
+ * 20:00" / "bis 20 Uhr"-shaped, a single time with no opening time of its
+ * own stated anywhere near it — and, only when it is deterministically
+ * safe, resolves it by inheriting the opening time from an already-
+ * resolved rule earlier in the same string. Real case: muzeumprahy.cz's
+ * real hours state "Úterý–neděle 10.00–18.00, čtvrtek do 20.00 hod."
+ * ("Tue-Sun 10-18, Thursday until 20:00") — one single, self-contained
+ * sentence about one museum, where Thursday's own opening time is never
+ * restated, only its later closing time; the general rule right before it
+ * is the only real candidate for what Thursday inherits.
+ *
+ * Every condition here exists to keep this from ever guessing:
+ *  - the fragment must appear immediately after the day group (only
+ *    whitespace/a comma between them) — anything else in between means
+ *    this isn't a clean, self-contained exception clause, and is refused
+ *    rather than searched for elsewhere in the text.
+ *  - the lone time must carry a real minute marker (colon/period/"h"),
+ *    same discipline findTimeRanges already applies — a bare number is
+ *    not confidently a time at all.
+ *  - EXACTLY ONE already-resolved rule's day-set must fully contain every
+ *    day this exception names. Zero matches means there is nothing to
+ *    inherit from; two or more means genuinely ambiguous WHICH rule's
+ *    opening time applies (real risk this guards against: multiple
+ *    earlier rules that could each plausibly supply the exception's
+ *    day) — both outcomes are refused, not guessed at.
+ *  - the inherited opening time must be strictly before the exception's
+ *    own stated closing time — an inherited pairing that produces a
+ *    zero-or-negative-length window is not a sane schedule and is refused
+ *    rather than emitted anyway.
+ */
+function findInheritedClosingTime(
+  boundaryText: string,
+  groupSpec: string,
+  resolvedParts: Array<{ spec: string; open: string; close: string }>
+): { open: string; close: string } | null {
+  const m = boundaryText.match(/^[\s,]*(?:do|until|bis)\s+(\d{1,2})(?::(\d{2})|\.(\d{2})|h(\d{2})?)?\b/i);
+  if (!m) return null;
+  const hasMarker = m[2] !== undefined || m[3] !== undefined || m[4] !== undefined;
+  if (!hasMarker) return null; // a bare number with no minute marker at all is not confidently a time
+
+  const h = Number(m[1]);
+  const min = Number(m[2] ?? m[3] ?? m[4] ?? 0);
+  if (h > 23 || min > 59) return null;
+  const close = closeFor(`${pad2(h)}:${pad2(min)}`);
+
+  const exceptionDays = expandDaySpec(groupSpec);
+  const candidates = resolvedParts.filter((p) => exceptionDays.every((d) => expandDaySpec(p.spec).includes(d)));
+  if (candidates.length !== 1) return null; // nothing to inherit from, or genuinely ambiguous which rule to use
+
+  const open = candidates[0].open;
+  if (open >= close) return null; // would produce a zero/negative-length window — not a sane result
+
+  return { open, close };
 }
 
 /**
@@ -654,12 +721,23 @@ export function looseTextToOsmSyntax(text: string): string | null {
   }
 
   const usedTimeIndices = new Set<number>();
-  const parts: Array<{ spec: string; open: string; close: string }> = [];
+  const parts: Array<{ spec: string; open: string; close: string; inherited?: boolean }> = [];
   for (let g = 0; g < groups.length; g++) {
     const group = groups[g];
     const boundary = g + 1 < groups.length ? groups[g + 1].start : trimmed.length;
     const timeIdx = times.findIndex((t, idx) => !usedTimeIndices.has(idx) && t.index >= group.end && t.index < boundary);
-    if (timeIdx === -1) return null; // a day group with no hours right after it — refuse rather than guess
+    if (timeIdx === -1) {
+      // No full open-close pair follows this day group — before refusing
+      // outright, check for the one narrow, deterministic exception this
+      // parser supports: a closing-time-only clause whose day(s) are all
+      // already covered by exactly one earlier-resolved rule in this same
+      // string (see findInheritedClosingTime's docstring for the real case
+      // and the exact safety conditions).
+      const inherited = findInheritedClosingTime(trimmed.slice(group.end, boundary), group.spec, parts);
+      if (!inherited) return null; // a day group with no hours right after it, and no safe inheritance — refuse rather than guess
+      parts.push({ spec: group.spec, open: inherited.open, close: inherited.close, inherited: true });
+      continue;
+    }
     usedTimeIndices.add(timeIdx);
     const t = times[timeIdx];
     parts.push({ spec: group.spec, open: t.open, close: closeFor(t.close) });
