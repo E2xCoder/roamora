@@ -306,17 +306,26 @@ function subtractMinutes(hhmm: string, minutes: number): string {
  * crawler.ts already uses for a place's own site — fixes the miss without
  * weakening anything: when no candidate looks event-shaped at all, this
  * still falls back to the previous behavior exactly.
+ *
+ * `destinationAliases` closes a second, real, distinct gap found while
+ * live-testing this exact function: `hasNameRelevance` rejects a genuinely
+ * relevant source using the destination's native-language name (real case:
+ * a real Czech events page titled "Praha - Akce" was filtered out entirely
+ * when `destination` was "Prague", since neither string is a substring of
+ * the other) — see geocode.ts's `nameVariants` for where this real,
+ * Nominatim-sourced (never hardcoded) alias data comes from.
  */
 export function selectEventDiscoverySource(
   results: WebSearchResult[],
-  destination: string
+  destination: string,
+  destinationAliases: string[] = []
 ): WebSearchResult | undefined {
-  const relevant = results.filter((r) => hasNameRelevance(r, destination));
+  const relevant = results.filter((r) => hasNameRelevance(r, destination, destinationAliases));
   const eventShaped = relevant
     .map((r) => ({ r, score: scoreLinkForFactType(r.url, r.title, "event") }))
     .filter((c) => c.score > 0)
     .sort((a, b) => b.score - a.score);
-  return eventShaped[0]?.r ?? selectBestResult(relevant, destination);
+  return eventShaped[0]?.r ?? selectBestResult(relevant, destination, destinationAliases);
 }
 
 function addMinutes(hhmm: string, minutes: number): string {
@@ -899,7 +908,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       const year = req.date.slice(0, 4);
       const discoveryQuery = `${req.destination} events calendar concerts festivals ${monthName} ${year}`;
       const results = await searxngProvider.searchWeb(discoveryQuery, 5);
-      const page = selectEventDiscoverySource(results, req.destination);
+      const page = selectEventDiscoverySource(results, req.destination, destGeo.nameVariants);
       if (!page) {
         trace.push({ stage: "event-discovery", status: "skipped", detail: "arama sonucu yok" });
       } else {
@@ -983,7 +992,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       remainingBudget,
       currency: req.currency,
     }),
-    researchLocalFood(req.destination, searchAvailable, aiAvailable),
+    researchLocalFood(req.destination, searchAvailable, aiAvailable, destGeo.nameVariants),
   ]);
 
   officialSourceMetrics.domainAttempted += restaurant.officialSourceMetrics.domainAttempted;

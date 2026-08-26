@@ -35,17 +35,30 @@ describe("selectEventDiscoverySource", () => {
   });
 
   it(
-    "known, related, distinct limitation found while testing this fix — NOT addressed here: " +
-      'hasNameRelevance rejects a genuinely relevant Czech source using the native "Praha" ' +
-      'spelling when req.destination is the English "Prague" exonym, since neither name is a ' +
-      "substring of the other. A real event-shaped page can still be filtered out upstream by " +
-      "this separate check before selectEventDiscoverySource's own event-keyword scoring ever " +
-      "gets a chance to prefer it.",
+    "real regression, now fixed: a genuinely relevant Czech source using the native \"Praha\" " +
+      'spelling used to be rejected outright when destination was the English "Prague" exonym, ' +
+      "before destinationAliases existed — without the alias it is still correctly filtered out " +
+      "(never weakened for callers that don't have alias data); with the real, Nominatim-sourced " +
+      'alias ("Praha", see geocode.ts\'s nameVariants) it is now correctly found and selected',
     () => {
-      const results = [
-        result({ title: "Praha - Akce a Program", url: "https://www.example-praha.cz/akce" }),
-      ];
+      const results = [result({ title: "Praha - Akce a Program", url: "https://www.example-praha.cz/akce" })];
       expect(selectEventDiscoverySource(results, "Prague")).toBeUndefined();
+      expect(selectEventDiscoverySource(results, "Prague", ["Praha"])?.url).toBe("https://www.example-praha.cz/akce");
+    }
+  );
+
+  it("Vienna/Wien: finds a real event-shaped local-language source once the local-name alias is supplied", () => {
+    const results = [result({ title: "Wien - Veranstaltungskalender September 2026", url: "https://example.at/events" })];
+    expect(selectEventDiscoverySource(results, "Vienna")).toBeUndefined();
+    expect(selectEventDiscoverySource(results, "Vienna", ["Wien"])?.url).toBe("https://example.at/events");
+  });
+
+  it(
+    "does not let the alias mechanism accept an unrelated page just because it shares the " +
+      "destination's country — a different real city (Brno) must still be rejected",
+    () => {
+      const results = [result({ title: "Brno - Akce a Program (Events)", url: "https://example-brno.cz/akce" })];
+      expect(selectEventDiscoverySource(results, "Prague", ["Praha"])).toBeUndefined();
     }
   );
 

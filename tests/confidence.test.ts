@@ -292,6 +292,17 @@ describe("selectBestResult", () => {
   it("returns undefined for an empty result list", () => {
     expect(selectBestResult([], "Some Place")).toBeUndefined();
   });
+
+  it(
+    "real regression: selects a genuine Czech events page over nothing at all, once the real " +
+      'local-name alias ("Praha") is supplied for a "Prague" search — without the alias this ' +
+      "candidate would be filtered out and the whole call would return undefined",
+    () => {
+      const results = [result({ title: "Praha - Akce a Program", url: "https://example-praha.cz/akce" })];
+      expect(selectBestResult(results, "Prague")).toBeUndefined();
+      expect(selectBestResult(results, "Prague", ["Praha"])?.url).toBe("https://example-praha.cz/akce");
+    }
+  );
 });
 
 describe("hasNameRelevance", () => {
@@ -310,5 +321,59 @@ describe("hasNameRelevance", () => {
 
   it("skips the check (returns true) for a name with no token 3+ characters long", () => {
     expect(hasNameRelevance(result({ title: "Anything at all" }), "A B")).toBe(true);
+  });
+
+  describe("with destination aliases (endonym/exonym coverage)", () => {
+    it(
+      "real regression: a genuine Czech events page titled \"Praha\" is rejected when checked " +
+        'against the English "Prague" alone — neither string is a substring of the other',
+      () => {
+        expect(hasNameRelevance(result({ title: "Praha - Akce a Program" }), "Prague")).toBe(false);
+      }
+    );
+
+    it("Prague/Praha: passes once the real, Nominatim-sourced local name is supplied as an alias", () => {
+      expect(hasNameRelevance(result({ title: "Praha - Akce a Program" }), "Prague", ["Praha"])).toBe(true);
+    });
+
+    it("Vienna/Wien: passes with the real local-name alias", () => {
+      expect(hasNameRelevance(result({ title: "Wien - Veranstaltungen im September" }), "Vienna", ["Wien"])).toBe(true);
+    });
+
+    it("Cologne/Köln: passes with the real local-name alias, diacritic-insensitively", () => {
+      expect(hasNameRelevance(result({ title: "Köln - Konzerte und Events" }), "Cologne", ["Köln"])).toBe(true);
+    });
+
+    it("Munich/München: passes with the real local-name alias", () => {
+      expect(hasNameRelevance(result({ title: "München Veranstaltungskalender" }), "Munich", ["München"])).toBe(true);
+    });
+
+    it("still passes on the original placeName alone when the alias is irrelevant to this particular result", () => {
+      expect(hasNameRelevance(result({ title: "Prague Castle opening hours" }), "Prague", ["Praha"])).toBe(true);
+    });
+
+    it(
+      "does NOT match a result just because it shares a country or an unrelated nearby word — " +
+        "aliases add real name forms of the SAME place, never a broader topical match",
+      () => {
+        expect(
+          hasNameRelevance(
+            result({ title: "Czech Republic travel guide: Brno, Ostrava, Plzeň" }),
+            "Prague",
+            ["Praha"]
+          )
+        ).toBe(false);
+      }
+    );
+
+    it("does NOT let a similar-looking but different place name accidentally match", () => {
+      // "Pardubice" is a real, different Czech city — must not be confused with "Praha"/"Prague".
+      expect(hasNameRelevance(result({ title: "Pardubice - Akce a Program" }), "Prague", ["Praha"])).toBe(false);
+    });
+
+    it("an empty aliases array behaves exactly like no aliases at all (no regression)", () => {
+      expect(hasNameRelevance(result({ title: "Prague Castle" }), "Prague", [])).toBe(true);
+      expect(hasNameRelevance(result({ title: "Praha - Akce" }), "Prague", [])).toBe(false);
+    });
   });
 });

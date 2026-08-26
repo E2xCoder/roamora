@@ -211,7 +211,8 @@ function hasAnyLocalFoodField(r: LocalFoodResult): boolean {
 export async function researchLocalFood(
   destination: string,
   searchAvailable: boolean,
-  aiAvailable: boolean
+  aiAvailable: boolean,
+  destinationAliases: string[] = []
 ): Promise<LocalFoodResult> {
   if (!aiAvailable) {
     return { status: "research-unavailable", reason: "AI sağlayıcı yapılandırılmamış" };
@@ -258,7 +259,11 @@ export async function researchLocalFood(
       `${destination} local food specialties traditional dishes must try`,
       5
     );
-    const page = selectBestResult(results, destination);
+    // destinationAliases: real, deterministic name-variant data (see
+    // geocode.ts's `nameVariants`) — closes the same "genuinely relevant
+    // native-language source rejected outright" gap fixed for event
+    // discovery (real case: "Prague" vs a Czech source's "Praha").
+    const page = selectBestResult(results, destination, destinationAliases);
     if (!page) return { status: "not-found", reason: "arama sonucu yok" };
 
     const fetched = await fetchTextCapped(page.url);

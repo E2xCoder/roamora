@@ -199,8 +199,21 @@ export function detectStaleness(sourceText: string, now: Date = new Date()): boo
  * "official" source. Short/generic names (≤2 significant tokens after
  * filtering) skip this check entirely rather than risk false negatives on
  * legitimately short place names.
+ *
+ * `aliases` covers a real, distinct gap this token check otherwise has no
+ * way to close: a genuinely relevant source using a destination's native-
+ * language name instead of whatever the user typed — real, live-caught
+ * case, a real Czech events calendar titled "Praha - Akce" was rejected
+ * outright when `placeName` was "Prague", since neither string is a
+ * substring of the other. Callers that have real, deterministic name-
+ * variant data (see geocode.ts's `nameVariants`, sourced from Nominatim's
+ * own `namedetails` — never a hardcoded city list) pass it here; every
+ * alias is tokenized and checked exactly like `placeName` itself, never
+ * given a lower bar, so this never accepts a page merely because it
+ * mentions the place's COUNTRY or an unrelated nearby word — only real,
+ * externally-sourced name forms of the exact same place are ever added.
  */
-export function hasNameRelevance(result: WebSearchResult, placeName: string): boolean {
+export function hasNameRelevance(result: WebSearchResult, placeName: string, aliases: string[] = []): boolean {
   const normalize = (s: string) =>
     s
       .toLowerCase()
@@ -208,16 +221,22 @@ export function hasNameRelevance(result: WebSearchResult, placeName: string): bo
       .replace(/[̀-ͯ]/g, "")
       .replace(/[^a-z0-9]+/g, " ")
       .trim();
-  const nameTokens = normalize(placeName)
-    .split(" ")
-    .filter((t) => t.length >= 3);
+  const nameTokens = [placeName, ...aliases].flatMap((n) =>
+    normalize(n)
+      .split(" ")
+      .filter((t) => t.length >= 3)
+  );
   if (nameTokens.length === 0) return true; // nothing meaningful to check a short/generic name against
   const haystack = normalize(`${result.title} ${result.url}`);
   return nameTokens.some((t) => haystack.includes(t));
 }
 
-export function selectBestResult(results: WebSearchResult[], placeName: string): WebSearchResult | undefined {
-  const relevant = results.filter((r) => hasNameRelevance(r, placeName));
+export function selectBestResult(
+  results: WebSearchResult[],
+  placeName: string,
+  aliases: string[] = []
+): WebSearchResult | undefined {
+  const relevant = results.filter((r) => hasNameRelevance(r, placeName, aliases));
   if (relevant.length === 0) return undefined; // no result had any real connection to the place — no source is more honest than a wrong one
   const ranked = [...relevant].sort((a, b) => {
     const officialA = isOfficialSource(a.url, a.title, placeName) ? 1 : 0;

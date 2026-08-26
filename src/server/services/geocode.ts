@@ -18,6 +18,40 @@ export interface GeocodeResult {
   city?: string;
   country?: string;
   countryCode?: string;
+  /**
+   * Real, deterministic endonym/exonym coverage for this place — its own
+   * OSM `name` tag (the local-language form, e.g. "Praha" for a "Prague"
+   * query) plus `name:en` when present and different (the English form,
+   * e.g. "Prague" for a "Praha" query) — sourced directly from Nominatim's
+   * `namedetails`, an existing dependency this service already calls, not
+   * a new one, and never a hardcoded city list. Real, live-verified
+   * pattern (Prague/Praha, Vienna/Wien, Cologne/Köln, Munich/München):
+   * whichever name the user did NOT type is exactly what a same-country
+   * source is likely to use, and `hasNameRelevance`/`selectBestResult`
+   * used to reject those sources outright since neither name is a
+   * substring of the other. Deliberately just these two forms, not the
+   * dozens of other language variants namedetails also returns — the
+   * local and English forms are what real destination-level searches
+   * (event discovery, local-food research) actually need to match against
+   * real result titles/URLs in the languages this pipeline has real
+   * evidence for; the rest would only add noise.
+   */
+  nameVariants: string[];
+}
+
+/**
+ * Extracts real, deterministic name variants from Nominatim's `namedetails`
+ * — the place's own local-language `name` plus `name:en` when present and
+ * different, deduplicated. Pure and separately testable on purpose: this is
+ * the one piece of real logic in an otherwise network/cache-bound module,
+ * and it is exactly what makes the Prague/Praha (and Vienna/Wien, Cologne/
+ * Köln, Munich/München, ...) endonym/exonym gap closeable without a
+ * hardcoded city list — see confidence.ts's `hasNameRelevance` for how
+ * these get used.
+ */
+export function extractNameVariants(namedetails: Record<string, string> | undefined): string[] {
+  const nd = namedetails ?? {};
+  return [...new Set([nd.name, nd["name:en"]].filter((n): n is string => Boolean(n)))];
 }
 
 const NAMESPACE = "geocode";
@@ -66,6 +100,7 @@ export async function geocodeOnce(
     url.searchParams.set("format", "json");
     url.searchParams.set("limit", "1");
     url.searchParams.set("addressdetails", "1");
+    url.searchParams.set("namedetails", "1");
 
     const res = await fetch(url, {
       headers: { "User-Agent": config.NOMINATIM_USER_AGENT },
@@ -78,10 +113,12 @@ export async function geocodeOnce(
       lon: string;
       display_name: string;
       address?: Record<string, string>;
+      namedetails?: Record<string, string>;
     }>;
 
     if (data.length > 0) {
       const a = data[0].address ?? {};
+      const nameVariants = extractNameVariants(data[0].namedetails);
       result = {
         lat: parseFloat(data[0].lat),
         lng: parseFloat(data[0].lon),
@@ -89,6 +126,7 @@ export async function geocodeOnce(
         city: a.city || a.town || a.village || a.municipality,
         country: a.country,
         countryCode: a.country_code?.toUpperCase(),
+        nameVariants,
       };
     }
   } catch (err) {
