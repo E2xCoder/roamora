@@ -22,13 +22,58 @@ import { htmlToPlainText } from "@/server/services/fact-extraction";
 
 export type FactPageType = "hours" | "price" | "menu" | "event";
 
-/** Path-keyword vocabulary, exactly as specified — checked against the URL path, not fuzzy-matched. */
+/**
+ * Keyword vocabulary, checked (diacritic-insensitive, see normalizeForMatch)
+ * against BOTH a candidate link's URL path AND its real anchor text — a
+ * plain keyword substring match, never fuzzy. Grouped by fact type, then by
+ * language within each, each language block added only where a real Prague
+ * site this session actually used it justified it (never a speculative
+ * "might as well cover every language" addition):
+ *
+ * Czech — this project's primary real-data testbed (Prague). Real,
+ * live-observed terms: nm.cz's own nav is literally
+ * "/navstivte-nas/oteviraci-doba" (Otevírací doba = opening hours),
+ * "/navstivte-nas/vstupenky" (tickets), "/navstivte-nas/program/akce"
+ * (events); muzeumkarlazemana.cz's hours link text is "Otevírací doba" with
+ * no matching URL slug at all — text-matching, not just the URL, is what
+ * finds it. "Otevírací doba"'s ACCENTED form is what real anchor text
+ * looks like; normalizeForMatch strips the accents before comparing, so the
+ * keyword list only needs the one plain-ASCII spelling.
+ *
+ * German/Polish — already-evidenced from this project's prior Berlin/
+ * Poznań real-data sessions (see git history); extended for `hours`
+ * specifically, since that category previously had zero non-English
+ * coverage at all while price/menu/event already had some.
+ */
 const FACT_PATH_KEYWORDS: Record<FactPageType, string[]> = {
-  hours: ["opening-hours", "openinghours", "hours", "visit", "visiting", "plan-your-visit", "planyourvisit"],
-  price: ["tickets", "admission", "prices", "cennik", "bilety", "entrance", "pricing"],
+  hours: [
+    "opening-hours", "openinghours", "hours", "visit", "visiting", "plan-your-visit", "planyourvisit",
+    "oteviraci doba", "oteviraci-doba", "oteviraci hodiny", "navstevni doba", "navstivte-nas", "navstivte nas",
+    "offnungszeiten", "oeffnungszeiten", "besuch",
+    "godziny otwarcia", "godziny-otwarcia",
+  ],
+  price: [
+    "tickets", "admission", "prices", "cennik", "bilety", "entrance", "pricing",
+    "vstupne", "vstupenka", "vstupenky", "vstupenku",
+  ],
   menu: ["menu", "menus", "speisekarte", "karta", "food"],
-  event: ["events", "calendar", "program", "agenda", "whats-on", "wydarzenia"],
+  event: [
+    "events", "calendar", "program", "agenda", "whats-on", "wydarzenia",
+    "akce",
+  ],
 };
+
+/**
+ * Diacritic-insensitive lowercase, same normalization discipline this
+ * codebase already applies elsewhere (confidence.ts, wikipedia-client.ts).
+ * A URL path is conventionally plain ASCII ("oteviraci-doba") while real
+ * anchor text keeps its native accents ("Otevírací doba") — normalizing
+ * both sides to the same accent-free form lets one plain-ASCII keyword
+ * list match either spelling, instead of listing every accented variant.
+ */
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
 
 const PAGE_LIMIT = 3; // real bound on how many candidate pages are ever fetched per resolution
 const NAMESPACE = "official-fact-page";
@@ -51,14 +96,20 @@ function decodeHrefEntities(raw: string): string {
     .replace(/&amp;/g, "&");
 }
 
+export interface SameDomainLink {
+  url: string;
+  /** The anchor's own visible text, collapsed to plain whitespace-separated text — real, live-observed need: several real sites (e.g. ngprague.cz's "/o-nas/budovy" linking text "Budovy a otevírací doba") carry their only hours/price/event signal in the link's TEXT, not its URL slug at all. */
+  text: string;
+}
+
 /**
- * Extracts absolute, same-domain, deduplicated link URLs from a page's raw
- * HTML. Deliberately a lightweight regex scan rather than a full DOM parser
- * — this project has no HTML-parsing dependency, and a fact-specific link's
- * href is a plain attribute value, not something that needs real DOM
- * semantics to find.
+ * Extracts absolute, same-domain, deduplicated links (URL + visible text)
+ * from a page's raw HTML. Deliberately a lightweight regex scan rather than
+ * a full DOM parser — this project has no HTML-parsing dependency, and a
+ * fact-specific link's href/text is plain markup, not something that needs
+ * real DOM semantics to find.
  */
-export function extractSameDomainLinks(html: string, baseUrl: string): string[] {
+export function extractSameDomainLinks(html: string, baseUrl: string): SameDomainLink[] {
   let base: URL;
   try {
     base = new URL(baseUrl);
@@ -66,9 +117,9 @@ export function extractSameDomainLinks(html: string, baseUrl: string): string[] 
     return [];
   }
 
-  const hrefRe = /<a\s[^>]*href\s*=\s*["']([^"'#][^"']*)["']/gi;
+  const hrefRe = /<a\s[^>]*href\s*=\s*["']([^"'#][^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: SameDomainLink[] = [];
 
   let match: RegExpExecArray | null;
   while ((match = hrefRe.exec(html)) !== null) {
@@ -87,22 +138,24 @@ export function extractSameDomainLinks(html: string, baseUrl: string): string[] 
     const normalized = resolved.toString();
     if (seen.has(normalized)) continue;
     seen.add(normalized);
-    out.push(normalized);
+    const text = decodeHrefEntities(match[2].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+    out.push({ url: normalized, text });
   }
 
   return out;
 }
 
-/** How strongly a URL's path matches the given fact type's keyword vocabulary — 0 means no match at all. */
-export function scoreLinkForFactType(url: string, factType: FactPageType): number {
+/** How strongly a link's URL path AND visible text match the given fact type's keyword vocabulary — 0 means no match at all. Diacritic-insensitive (see normalizeForMatch); a plain substring match, never fuzzy. */
+export function scoreLinkForFactType(url: string, linkText: string, factType: FactPageType): number {
   let path: string;
   try {
-    path = new URL(url).pathname.toLowerCase();
+    path = new URL(url).pathname;
   } catch {
     return 0;
   }
+  const haystack = normalizeForMatch(`${path} ${linkText}`);
   const keywords = FACT_PATH_KEYWORDS[factType];
-  return keywords.reduce((score, kw) => (path.includes(kw) ? score + 1 : score), 0);
+  return keywords.reduce((score, kw) => (haystack.includes(kw) ? score + 1 : score), 0);
 }
 
 // A real, content-bearing fact page has meaningfully more extractable text
@@ -225,12 +278,12 @@ export async function resolveFactPageUrl(officialUrl: string, factType: FactPage
     const candidates = extractSameDomainLinks(homepage.text, effectiveHomepageUrl)
       .filter((link) => {
         try {
-          return isPathAllowed(new URL(link).pathname, robotsDisallow);
+          return isPathAllowed(new URL(link.url).pathname, robotsDisallow);
         } catch {
           return false;
         }
       })
-      .map((link) => ({ link, score: scoreLinkForFactType(link, factType) }))
+      .map((link) => ({ link: link.url, score: scoreLinkForFactType(link.url, link.text, factType) }))
       .filter((c) => c.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, PAGE_LIMIT);

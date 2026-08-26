@@ -7,27 +7,31 @@ import {
   checkPageContent,
 } from "@/server/services/official-site-crawler";
 
+function link(url: string, text = "") {
+  return { url, text };
+}
+
 describe("extractSameDomainLinks", () => {
   it("resolves relative links against the base URL", () => {
     const html = `<a href="/visit/opening-hours">Hours</a>`;
     expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([
-      "https://example.com/visit/opening-hours",
+      link("https://example.com/visit/opening-hours", "Hours"),
     ]);
   });
 
   it("keeps only links on the same hostname", () => {
     const html = `<a href="https://example.com/hours">Hours</a><a href="https://other.com/hours">Other</a>`;
-    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual(["https://example.com/hours"]);
+    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([link("https://example.com/hours", "Hours")]);
   });
 
   it("deduplicates identical resolved URLs", () => {
     const html = `<a href="/menu">Menu</a><a href="/menu">Menu again</a>`;
-    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual(["https://example.com/menu"]);
+    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([link("https://example.com/menu", "Menu")]);
   });
 
   it("strips the fragment when deduplicating (same page, different anchor)", () => {
     const html = `<a href="/menu#top">Menu</a><a href="/menu#bottom">Menu again</a>`;
-    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual(["https://example.com/menu"]);
+    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([link("https://example.com/menu", "Menu")]);
   });
 
   it("ignores mailto:, tel:, and javascript: links", () => {
@@ -46,52 +50,125 @@ describe("extractSameDomainLinks", () => {
     () => {
       const html = `<a href="http&#x3A;&#x2F;&#x2F;www.example.de&#x2F;speisekarte">Speisekarte</a>`;
       expect(extractSameDomainLinks(html, "http://www.example.de/")).toEqual([
-        "http://www.example.de/speisekarte",
+        link("http://www.example.de/speisekarte", "Speisekarte"),
       ]);
     }
   );
 
   it("decodes decimal numeric character references too", () => {
     const html = `<a href="&#104;&#116;&#116;&#112;&#58;&#47;&#47;example.com&#47;menu">Menu</a>`;
-    expect(extractSameDomainLinks(html, "http://example.com/")).toEqual(["http://example.com/menu"]);
+    expect(extractSameDomainLinks(html, "http://example.com/")).toEqual([link("http://example.com/menu", "Menu")]);
   });
 
   it("does not throw on a genuinely unparseable href, and still returns the valid links around it", () => {
     const html = `<a href="/ok">ok</a><a href="http://[not-a-valid-host">bad</a><a href="/also-ok">also ok</a>`;
     expect(() => extractSameDomainLinks(html, "https://example.com/")).not.toThrow();
     const result = extractSameDomainLinks(html, "https://example.com/");
-    expect(result).toContain("https://example.com/ok");
-    expect(result).toContain("https://example.com/also-ok");
+    expect(result.map((l) => l.url)).toContain("https://example.com/ok");
+    expect(result.map((l) => l.url)).toContain("https://example.com/also-ok");
+  });
+
+  it(
+    "real case: captures the anchor's own visible text alongside its URL (ngprague.cz's real " +
+      'nav has a link to "/o-nas/budovy" with visible text "Budovy a otevírací doba" — the URL ' +
+      "slug alone carries no hours signal at all)",
+    () => {
+      const html = `<a href="/o-nas/budovy">Budovy a otevírací doba</a>`;
+      expect(extractSameDomainLinks(html, "https://www.ngprague.cz/")).toEqual([
+        link("https://www.ngprague.cz/o-nas/budovy", "Budovy a otevírací doba"),
+      ]);
+    }
+  );
+
+  it("strips nested markup from the anchor text and collapses whitespace", () => {
+    const html = `<a href="/hours">  Opening\n<span>Hours</span>  </a>`;
+    expect(extractSameDomainLinks(html, "https://example.com/")).toEqual([
+      link("https://example.com/hours", "Opening Hours"),
+    ]);
   });
 });
 
 describe("scoreLinkForFactType", () => {
   it("scores a hours-path URL for the 'hours' fact type", () => {
-    expect(scoreLinkForFactType("https://example.com/plan-your-visit", "hours")).toBeGreaterThan(0);
+    expect(scoreLinkForFactType("https://example.com/plan-your-visit", "", "hours")).toBeGreaterThan(0);
   });
 
   it("scores a Polish ticket-price path for the 'price' fact type", () => {
-    expect(scoreLinkForFactType("https://example.com/cennik", "price")).toBeGreaterThan(0);
+    expect(scoreLinkForFactType("https://example.com/cennik", "", "price")).toBeGreaterThan(0);
   });
 
   it("scores a German menu path for the 'menu' fact type", () => {
-    expect(scoreLinkForFactType("https://example.com/speisekarte", "menu")).toBeGreaterThan(0);
+    expect(scoreLinkForFactType("https://example.com/speisekarte", "", "menu")).toBeGreaterThan(0);
   });
 
   it("scores an events/calendar path for the 'event' fact type", () => {
-    expect(scoreLinkForFactType("https://example.com/whats-on", "event")).toBeGreaterThan(0);
+    expect(scoreLinkForFactType("https://example.com/whats-on", "", "event")).toBeGreaterThan(0);
   });
 
   it("returns 0 for a path with no relevant keyword", () => {
-    expect(scoreLinkForFactType("https://example.com/about-us", "hours")).toBe(0);
+    expect(scoreLinkForFactType("https://example.com/about-us", "", "hours")).toBe(0);
   });
 
   it("does not cross-match an unrelated fact type's keywords", () => {
-    expect(scoreLinkForFactType("https://example.com/tickets", "menu")).toBe(0);
+    expect(scoreLinkForFactType("https://example.com/tickets", "", "menu")).toBe(0);
   });
 
   it("returns 0 for a malformed URL rather than throwing", () => {
-    expect(scoreLinkForFactType("not a url", "hours")).toBe(0);
+    expect(scoreLinkForFactType("not a url", "", "hours")).toBe(0);
+  });
+
+  it(
+    "real case: scores a link by its VISIBLE TEXT when the URL slug itself carries no signal " +
+      '(ngprague.cz: URL "/o-nas/budovy" has no hours keyword at all; its real link text ' +
+      '"Budovy a otevírací doba" does)',
+    () => {
+      expect(scoreLinkForFactType("https://www.ngprague.cz/o-nas/budovy", "Budovy a otevírací doba", "hours")).toBeGreaterThan(0);
+      expect(scoreLinkForFactType("https://www.ngprague.cz/o-nas/budovy", "", "hours")).toBe(0);
+    }
+  );
+
+  it(
+    "real case: matches a Czech URL slug for 'hours' (nm.cz's real nav: " +
+      '"/navstivte-nas/oteviraci-doba")',
+    () => {
+      expect(scoreLinkForFactType("https://www.nm.cz/navstivte-nas/oteviraci-doba", "", "hours")).toBeGreaterThan(0);
+    }
+  );
+
+  it(
+    "real case: matches accented Czech link text for 'hours', diacritic-insensitively " +
+      '(muzeumkarlazemana.cz\'s real hours link text is "Otevírací doba" on a URL with no ' +
+      "matching slug at all)",
+    () => {
+      expect(
+        scoreLinkForFactType("https://muzeumkarlazemana.cz/kontakt-vstupne", "Otevírací doba", "hours")
+      ).toBeGreaterThan(0);
+    }
+  );
+
+  it(
+    "real case: matches a Czech ticket-price term (muzeumprahy.cz's real link text is " +
+      '"Koupit vstupenku"; nm.cz\'s real URL slug is "/navstivte-nas/vstupenky")',
+    () => {
+      expect(scoreLinkForFactType("https://eshop.example.cz/koupit", "Koupit vstupenku", "price")).toBeGreaterThan(0);
+      expect(scoreLinkForFactType("https://www.nm.cz/navstivte-nas/vstupenky", "", "price")).toBeGreaterThan(0);
+    }
+  );
+
+  it('real case: matches a Czech events term ("akce" — nm.cz\'s real URL "/navstivte-nas/program/akce")', () => {
+    expect(scoreLinkForFactType("https://www.nm.cz/navstivte-nas/program/akce", "", "event")).toBeGreaterThan(0);
+  });
+
+  it("matches German 'Öffnungszeiten' for hours, diacritic-insensitively", () => {
+    expect(scoreLinkForFactType("https://example.de/kontakt", "Öffnungszeiten", "hours")).toBeGreaterThan(0);
+  });
+
+  it("matches Polish 'godziny otwarcia' for hours", () => {
+    expect(scoreLinkForFactType("https://example.pl/kontakt", "Godziny otwarcia", "hours")).toBeGreaterThan(0);
+  });
+
+  it("does not let a Czech hours term leak into an unrelated fact type", () => {
+    expect(scoreLinkForFactType("https://www.nm.cz/navstivte-nas/oteviraci-doba", "Otevírací doba", "menu")).toBe(0);
   });
 });
 
