@@ -2,6 +2,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import fs from "fs/promises";
+import { config } from "@/server/config";
 
 const execAsync = promisify(exec);
 
@@ -117,11 +118,11 @@ export async function extractPlaceWithAI(text: string): Promise<string | null> {
 
 Post: ${text.slice(0, 1000)}`;
 
-    const res = await fetch("http://localhost:11434/api/generate", {
+    const res = await fetch(`${config.OLLAMA_BASE_URL}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "llama3.1:8b",
+        model: config.OLLAMA_MODEL,
         prompt,
         stream: false,
         options: { temperature: 0.1, num_predict: 100 },
