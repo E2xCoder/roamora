@@ -28,6 +28,18 @@ function formatWalk(seconds: number) {
   const m = Math.round(seconds / 60);
   return m < 1 ? "<1 dk" : `${m} dk`;
 }
+/** How long this stop is actually visited for — real, already-scheduled arrival/departure, just labeled instead of left as mental subtraction. */
+function visitDuration(arrivalTime?: string | null, departureTime?: string | null): string | null {
+  if (!arrivalTime || !departureTime) return null;
+  const [ah, am] = arrivalTime.split(":").map(Number);
+  const [dh, dm] = departureTime.split(":").map(Number);
+  if ([ah, am, dh, dm].some((n) => Number.isNaN(n))) return null;
+  const minutes = dh * 60 + dm - (ah * 60 + am);
+  if (minutes <= 0) return null;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? (m > 0 ? `${h}s ${m}dk` : `${h}s`) : `${m}dk`;
+}
 
 export default function TripDetailPage() {
   const params = useParams<{ id: string }>();
@@ -74,6 +86,7 @@ export default function TripDetailPage() {
   }, [activities]);
 
   async function deleteTrip() {
+    if (!trip || !window.confirm(`${trip.destination} gezisini sil? Bu işlem geri alınamaz.`)) return;
     await fetch(`/api/trips/${params.id}`, { method: "DELETE" });
     router.push("/trips");
   }
@@ -120,7 +133,12 @@ export default function TripDetailPage() {
             <Trash2 size={16} />
           </button>
         </div>
-        <h1 className="text-2xl md:text-3xl font-bold uppercase tracking-tight">{trip.destination}</h1>
+        {/* Real bug, live-observed: CSS text-transform:uppercase is locale-sensitive under the page's
+            lang="tr" — it turned "Prague, Czech Republic" into "PRAGUE, CZECH REPUBLİC" (Turkish
+            dotted İ). trip.destination is arbitrary text (any language), so it's uppercased in JS
+            (locale-invariant unless toLocaleUpperCase("tr") is used, which this isn't) instead of
+            via the CSS class. */}
+        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">{trip.destination.toUpperCase()}</h1>
         <div className="flex flex-wrap items-center gap-2 mt-2 text-sm text-muted-fg">
           <span>{trip.startDate} – {trip.endDate}</span>
           <span className="text-card-border">•</span>
@@ -318,6 +336,9 @@ function TimelineItem({
               <span className="text-xs font-medium">{activity.arrivalTime ?? activity.timeSlot.split("-")[0]}
                 {activity.departureTime ? `–${activity.departureTime}` : ""}
               </span>
+              {visitDuration(activity.arrivalTime, activity.departureTime) && (
+                <span className="text-[11px] text-muted">({visitDuration(activity.arrivalTime, activity.departureTime)})</span>
+              )}
               {fixedEvent && <Badge variant="accent">Sabit Saat</Badge>}
               {hiddenGem && <Badge variant="accent"><Gem size={9} /> Gizli Hazine</Badge>}
               {isRestaurant && <Badge variant="warning"><UtensilsCrossed size={9} /> Restoran</Badge>}

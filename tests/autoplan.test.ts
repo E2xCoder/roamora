@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectEventDiscoverySource, deriveOsmVerifiedFreePrice } from "@/server/services/autoplan";
+import { selectEventDiscoverySource, deriveOsmVerifiedFreePrice, buildNoCandidatesError } from "@/server/services/autoplan";
 import type { WebSearchResult } from "@/server/providers/research/types";
 
 function result(overrides: Partial<WebSearchResult> = {}): WebSearchResult {
@@ -115,5 +115,26 @@ describe("deriveOsmVerifiedFreePrice", () => {
 
   it('an unrelated fee value (e.g. "donation") is not the same fact as a confirmed "no" — must not be treated as verified-free', () => {
     expect(deriveOsmVerifiedFreePrice("donation")).toBeNull();
+  });
+});
+
+describe("buildNoCandidatesError", () => {
+  it(
+    "real product bug: a transient Overpass 504/rate-limit used to surface as \"no places found around " +
+      "<destination>\" — actively misleading for a real, data-rich city (live-observed case: Prague, " +
+      "mid-plan, discovery.complete=false) since it reads as a fact about the destination rather than a " +
+      "retry-worthy service hiccup",
+    () => {
+      const err = buildNoCandidatesError("Prague, Czech Republic", false);
+      expect(err.code).toBe("DISCOVERY_UNAVAILABLE");
+      expect(err.message).not.toContain("Prague");
+      expect(err.message.toLowerCase()).toMatch(/ulaşılamıyor|tekrar/);
+    }
+  );
+
+  it("a genuinely complete-but-empty discovery (a real tiny/remote destination) keeps the original, accurate message", () => {
+    const err = buildNoCandidatesError("Nowhere Atoll", true);
+    expect(err.code).toBe("NO_CANDIDATES");
+    expect(err.message).toContain("Nowhere Atoll");
   });
 });

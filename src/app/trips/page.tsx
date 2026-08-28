@@ -33,9 +33,14 @@ export default function TripsPage() {
       .catch((err) => setError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı"));
   }, []);
 
-  async function deleteTrip(id: string, e: React.MouseEvent) {
+  async function deleteTrip(id: string, destination: string, e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
+    // A real trip is a real, non-trivial research result (routing, restaurant,
+    // hidden-gem, price research) with no undo — a single misclick on a hover-
+    // reveal icon deleting it outright is a real data-loss risk worth one
+    // confirmation, not a redesign.
+    if (!window.confirm(`${destination} gezisini sil? Bu işlem geri alınamaz.`)) return;
     await fetch(`/api/trips/${id}`, { method: "DELETE" });
     setTrips((prev) => prev?.filter((t) => t.id !== id) ?? null);
   }
@@ -104,7 +109,7 @@ export default function TripsPage() {
                   ))}
                 </div>
                 <button
-                  onClick={(e) => deleteTrip(trip.id, e)}
+                  onClick={(e) => deleteTrip(trip.id, trip.destination, e)}
                   aria-label={`${trip.destination} gezisini sil`}
                   className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-muted hover:text-danger p-1.5 rounded-xl hover:bg-surface transition-all"
                 >

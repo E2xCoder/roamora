@@ -605,6 +605,11 @@ function HomeContent() {
                     <p className="text-xs text-muted-fg mt-1">
                       {opt.result.itinerary.stops.length} durak · {(opt.result.itinerary.totalDistanceMeters / 1000).toFixed(1)} km
                     </p>
+                    {/* Real place names, not just a count — three numbers alone don't tell a traveller what's actually different between options. */}
+                    <p className="text-[11px] text-muted-fg mt-1.5 line-clamp-2">
+                      {opt.result.itinerary.stops.slice(0, 3).map((s) => s.name).join(" · ")}
+                      {opt.result.itinerary.stops.length > 3 && " · ..."}
+                    </p>
                     {opt.result.hiddenGems.found.length > 0 && (
                       <p className="text-[11px] text-accent mt-1">{opt.result.hiddenGems.found.length} gizli hazine</p>
                     )}
@@ -644,7 +649,13 @@ function HomeContent() {
 
 export default function HomePage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense
+      fallback={
+        <div className="min-h-dvh flex items-center justify-center">
+          <Loader2 size={22} className="animate-spin text-primary" />
+        </div>
+      }
+    >
       <HomeContent />
     </Suspense>
   );

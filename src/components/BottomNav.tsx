@@ -24,7 +24,7 @@ const PRIMARY_NAV = [
 ];
 
 const SECONDARY_NAV = [
-  { href: "/map", label: "Harita", icon: Map },
+  { href: "/map", label: "Map", icon: Map },
   { href: "/hiking", label: "Hiking", icon: Mountain },
   { href: "/import", label: "Import", icon: Upload },
 ];

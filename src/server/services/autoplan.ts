@@ -353,6 +353,26 @@ function addMinutes(hhmm: string, minutes: number): string {
 }
 
 /**
+ * Zero discovered candidates means one of two very different things: a
+ * genuinely tiny/remote destination with no real OSM data (rare), or the
+ * OSM/Overpass discovery request itself timing out or being rate-limited
+ * (a real, live-observed, transient condition on the public instance).
+ * Reporting the second case as "no places found around <destination>" is
+ * actively misleading — it reads as a fact about the destination rather
+ * than a retry-worthy service hiccup — so the two get distinct, honest
+ * messages instead of one generic one.
+ */
+export function buildNoCandidatesError(destination: string, discoveryComplete: boolean): AutoplanError {
+  if (!discoveryComplete) {
+    return new AutoplanError(
+      "DISCOVERY_UNAVAILABLE",
+      "Yer verisi kaynağına (OpenStreetMap) şu an ulaşılamıyor — birazdan tekrar dene."
+    );
+  }
+  return new AutoplanError("NO_CANDIDATES", `${destination} çevresinde OpenStreetMap üzerinde yer bulunamadı.`);
+}
+
+/**
  * Fetches and extracts hours from a second, independent search result and
  * reports whether it agrees with the first source's resolved OSM syntax.
  * Deliberately strict — an exact string match, not a fuzzy overlap check —
@@ -462,12 +482,14 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
 
   // --- 2. autonomous POI discovery (OSM) -----------------------------------
   let discovered;
+  let discoveryComplete = true;
   try {
     const result = await overpassDiscovery.discoverDetailed(
       center,
       config.DISCOVERY_RADIUS_METERS
     );
     discovered = result.places;
+    discoveryComplete = result.complete;
     trace.push({
       stage: "discovery",
       status: result.complete ? "ok" : "ok", // partial data is still usable, just noted
@@ -489,10 +511,7 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
   }
 
   if (discovered.length === 0) {
-    throw new AutoplanError(
-      "NO_CANDIDATES",
-      `${req.destination} çevresinde OpenStreetMap üzerinde yer bulunamadı.`
-    );
+    throw buildNoCandidatesError(req.destination, discoveryComplete);
   }
 
   // --- 3. score, classify, prune -------------------------------------------

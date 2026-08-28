@@ -55,7 +55,12 @@ export async function POST(request: Request) {
       await completeJob(jobId, result);
     } catch (err) {
       if (err instanceof AutoplanError) {
-        await failJob(jobId, `${err.code}: ${err.message}`);
+        // The code (e.g. "NO_CANDIDATES") is real, useful signal for logs/
+        // debugging, but a raw snake_case code prefixed onto an otherwise
+        // clean Turkish sentence reads as a backend artifact to a real user
+        // — kept out of the user-facing message, logged separately instead.
+        console.error(`[autoplan] job ${jobId} failed: ${err.code}`);
+        await failJob(jobId, err.message);
       } else {
         await failJob(jobId, err);
       }

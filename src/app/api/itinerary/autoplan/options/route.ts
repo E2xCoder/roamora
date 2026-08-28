@@ -53,7 +53,10 @@ export async function POST(request: Request) {
       await completeJob(jobId, result);
     } catch (err) {
       if (err instanceof AutoplanError) {
-        await failJob(jobId, `${err.code}: ${err.message}`);
+        // See the single-plan route's identical comment: the code is kept
+        // out of the user-facing message and logged separately instead.
+        console.error(`[autoplan-options] job ${jobId} failed: ${err.code}`);
+        await failJob(jobId, err.message);
       } else {
         await failJob(jobId, err);
       }
