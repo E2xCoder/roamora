@@ -41,15 +41,28 @@ const POPULAR_TRAILS = [
   { name: "Laugavegur", emoji: "🇮🇸" },
 ];
 
+/** Roughly a 25km-wide box — enough to cover a city's own nearby trail network without pulling in a whole region. */
+const DESTINATION_SEARCH_DEGREES = 0.11;
+
 export default function HikingPage() {
   const [query, setQuery] = useState("");
   const [trails, setTrails] = useState<WaymarkedTrail[]>([]);
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
+  // "Find a hike" needs a way in that doesn't require already knowing a real
+  // trail's name — reuses the existing /api/hiking?source=waymarked&south=...
+  // bbox endpoint (already implemented server-side, just never wired to this
+  // page) with the same WaymarkedTrail result shape name search already uses.
+  const [destQuery, setDestQuery] = useState("");
+  const [destLoading, setDestLoading] = useState(false);
+  const [destError, setDestError] = useState<string | null>(null);
+  const [destLabel, setDestLabel] = useState<string | null>(null);
 
   async function searchTrails(searchQuery?: string) {
     const q = searchQuery || query;
     if (!q) return;
+    setDestLabel(null);
+    setDestError(null);
     setLoading(true);
     if (searchQuery) setQuery(searchQuery);
     const res = await fetch(`/api/hiking?source=waymarked&q=${encodeURIComponent(q)}`);
@@ -58,6 +71,40 @@ export default function HikingPage() {
     setTrails(results);
     setTotal(typeof data.total === "number" ? data.total : results.length);
     setLoading(false);
+  }
+
+  async function searchNearDestination() {
+    const q = destQuery.trim();
+    if (!q) return;
+    setDestLoading(true);
+    setDestError(null);
+    try {
+      const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      const geoBody = await geoRes.json().catch(() => null);
+      if (!geoRes.ok) {
+        setDestError(geoBody?.error ?? "Bu hedef bulunamadı");
+        return;
+      }
+      const { lat, lng, displayName } = geoBody;
+      const params = new URLSearchParams({
+        source: "waymarked",
+        south: String(lat - DESTINATION_SEARCH_DEGREES),
+        north: String(lat + DESTINATION_SEARCH_DEGREES),
+        west: String(lng - DESTINATION_SEARCH_DEGREES),
+        east: String(lng + DESTINATION_SEARCH_DEGREES),
+      });
+      const res = await fetch(`/api/hiking?${params}`);
+      const data: TrailSearchResult = await res.json();
+      const results = data.results ?? [];
+      setTrails(results);
+      setTotal(typeof data.total === "number" ? data.total : results.length);
+      setDestLabel(displayName ?? q);
+      setQuery("");
+    } catch (err) {
+      setDestError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
+    } finally {
+      setDestLoading(false);
+    }
   }
 
   function formatDistance(meters: number) {
@@ -79,7 +126,35 @@ export default function HikingPage() {
         </div>
       </div>
 
-      <div className="px-6 mb-6 max-w-6xl mx-auto">
+      <div className="px-6 mb-6 max-w-6xl mx-auto space-y-3">
+        {/* Destination-based discovery — the real gap this page had: it used to require already knowing a trail's name. */}
+        <div>
+          <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide mb-1.5 block">Bir yere yakın rota bul</label>
+          <div className="flex items-center bg-card border border-card-border rounded-2xl overflow-hidden focus-within:border-primary/50 focus-within:shadow-[0_0_0_4px_var(--primary-glow)] transition-all">
+            <MapPin size={16} className="ml-4 text-muted shrink-0" />
+            <input
+              type="text"
+              value={destQuery}
+              onChange={(e) => setDestQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && searchNearDestination()}
+              placeholder="or: Prag, Çekya"
+              className="flex-1 px-3 py-3.5 bg-transparent text-sm focus:outline-none"
+            />
+            <div className="m-1.5">
+              <Button onClick={searchNearDestination} disabled={destLoading || !destQuery.trim()} variant="primary">
+                {destLoading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+              </Button>
+            </div>
+          </div>
+          {destError && <p className="text-[11px] text-danger mt-1.5">{destError}</p>}
+        </div>
+
+        <div className="flex items-center gap-3 px-2">
+          <div className="flex-1 h-px bg-card-border" />
+          <span className="text-[11px] font-semibold text-muted uppercase tracking-wider">veya rota adıyla ara</span>
+          <div className="flex-1 h-px bg-card-border" />
+        </div>
+
         <div className="flex items-center bg-card border border-card-border rounded-2xl overflow-hidden focus-within:border-primary/50 focus-within:shadow-[0_0_0_4px_var(--primary-glow)] transition-all">
           <Search size={16} className="ml-4 text-muted shrink-0" />
           <input
@@ -117,7 +192,8 @@ export default function HikingPage() {
       <div className="px-6 max-w-6xl mx-auto">
         {trails.length > 0 && (
           <p className="text-xs text-muted-fg mb-4">
-            <span className="font-semibold text-foreground">{total}</span> sonuç bulundu
+            <span className="font-semibold text-foreground">{total}</span>{" "}
+            {destLabel ? <>sonuç — <span className="text-foreground">{destLabel}</span> yakınında</> : "sonuç bulundu"}
           </p>
         )}
 

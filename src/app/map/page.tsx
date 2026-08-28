@@ -330,6 +330,8 @@ export default function MapPage() {
   }
 
   async function handleDelete(id: string) {
+    const name = places.find((p) => p.id === id)?.name ?? "bu yer";
+    if (!window.confirm(`${name} silinsin mi? Bu işlem geri alınamaz.`)) return;
     await fetch(`/api/places/${id}`, { method: "DELETE" });
     setStops((prev) => prev.filter((s) => s.id !== id));
     loadPlaces();

@@ -111,6 +111,7 @@ export default function PlaceDetailPage() {
   }
 
   async function handleDelete() {
+    if (!place || !window.confirm(`${place.name} yerini sil? Bu işlem geri alınamaz.`)) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/places/${id}`, { method: "DELETE" });

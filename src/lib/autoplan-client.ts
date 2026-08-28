@@ -68,6 +68,9 @@ export interface RestaurantCandidateResult {
   lng: number;
   cuisine?: string;
   mealWindow: "lunch" | "dinner";
+  /** Real fields restaurant.ts already returns but this type previously omitted — the trip detail page had no way to show "hours verified" for a selected restaurant even though the backend already knew. */
+  openingHoursSource: "osm" | "web-research" | "unverified";
+  openingHoursConfidence: "high" | "medium" | "low" | "unknown";
   menuItems: MenuItemResult[];
   menuAvailability: { status: "extracted" | "no-source" | "unavailable"; reason?: string };
   estimatedMealCost?: number;
@@ -173,6 +176,70 @@ interface JobView<T> {
   stepLabel: string | null;
   result: T | null;
   error: string | null;
+}
+
+/** Real stage-name prefixes this pipeline actually emits (see autoplan.ts's trace stages / job-runner.ts's stepLabel format "stage: detail") — used both to tick off a friendly checklist and to translate the current raw label into a human sentence (see humanizeProgressLabel below), never a fake timer. */
+export const PLANNING_STAGES: Array<{ key: string; label: string }> = [
+  { key: "geocode", label: "Konum bulunuyor" },
+  { key: "weather", label: "Hava durumu kontrol ediliyor" },
+  { key: "discovery", label: "Yerler keşfediliyor" },
+  { key: "restaurant", label: "Restoran aranıyor" },
+  { key: "local-food", label: "Yerel lezzetler araştırılıyor" },
+  { key: "event", label: "Etkinlikler kontrol ediliyor" },
+  { key: "hidden-gem", label: "Gizli hazineler aranıyor" },
+  { key: "routing", label: "Rota hesaplanıyor" },
+  { key: "budget", label: "Bütçe optimize ediliyor" },
+  { key: "departure-safety", label: "Kalkış güvenliği kontrol ediliyor" },
+];
+
+/** The three real A/B/C pace keys planTripOptions() emits (trip-options.ts) — the only values that can appear inside a "[...]" prefix. */
+const OPTION_LABELS: Record<string, string> = {
+  max_experience: "A seçeneği",
+  balanced: "B seçeneği",
+  relaxed: "C seçeneği",
+};
+
+/**
+ * Which PLANNING_STAGES entry a raw job stepLabel is currently reporting, if
+ * any — startsWith, not includes: "event-discovery" must resolve to the
+ * "event" stage, not "discovery" — a real ambiguity ("discovery" is a
+ * substring of "event-discovery" too) that a loose includes() match got
+ * wrong. Shared by humanizeProgressLabel (the display sentence) and the Plan
+ * screen's checklist (which stage to tick as seen) so both agree on the
+ * exact same resolution.
+ */
+export function resolveProgressStage(rawLabel: string): (typeof PLANNING_STAGES)[number] | null {
+  const withoutDayPrefix = rawLabel.replace(/^Gün \d+\/\d+: /, "");
+  const withoutOptionPrefix = withoutDayPrefix.replace(/^\[\w+\]\s*/, "");
+  return PLANNING_STAGES.find((s) => withoutOptionPrefix.startsWith(s.key)) ?? null;
+}
+
+/**
+ * Turns a raw job stepLabel into a clean, human sentence — never surfacing
+ * the backend's own stage/status vocabulary or its numeric detail. Real bug
+ * fixed here: the raw label used to be shown to the user verbatim during
+ * planning, so a real multi-day A/B/C run could show
+ * "[max_experience] departure-safety-reroute:optimize: 3 çakışma tespit edildi"
+ * mid-progress — accurate to the backend, meaningless to a traveller. Any
+ * label that doesn't match a known stage (a format this pipeline doesn't
+ * currently emit) falls back to a generic, still-honest "preparing" message
+ * rather than leaking the raw string.
+ */
+export function humanizeProgressLabel(rawLabel: string): string {
+  let dayPrefix = "";
+  let optionPrefix = "";
+
+  const dayMatch = rawLabel.match(/^Gün (\d+)\/(\d+): /);
+  if (dayMatch) dayPrefix = `Gün ${dayMatch[1]}/${dayMatch[2]} — `;
+
+  const optionMatch = rawLabel.replace(/^Gün \d+\/\d+: /, "").match(/^\[(\w+)\]\s*/);
+  if (optionMatch) {
+    const known = OPTION_LABELS[optionMatch[1]];
+    if (known) optionPrefix = `${known}: `;
+  }
+
+  const stage = resolveProgressStage(rawLabel);
+  return `${dayPrefix}${optionPrefix}${stage ? stage.label : "Plan hazırlanıyor"}`;
 }
 
 /** Polls a job created by /api/itinerary/autoplan(/options) until it settles, reporting real progress as it goes. */

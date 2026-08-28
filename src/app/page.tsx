@@ -11,6 +11,7 @@ import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import {
   dateRange, runSingleDay, runOptions, persistDays,
+  humanizeProgressLabel, resolveProgressStage, PLANNING_STAGES,
   MAX_TRIP_DAYS, type TripOption, type AutoplanResult, type PlanRequestBase,
 } from "@/lib/autoplan-client";
 
@@ -34,19 +35,12 @@ const PACE_PRESETS = {
 } as const;
 type Pace = keyof typeof PACE_PRESETS;
 
-/** Real stage-name prefixes this pipeline actually emits (see autoplan.ts's trace stages / job-runner.ts's stepLabel format "stage: detail") — used only to tick off a friendly checklist as real progress is observed, never a fake timer. */
-const STAGE_CHECKLIST: Array<{ key: string; label: string }> = [
-  { key: "geocode", label: "Konum bulunuyor" },
-  { key: "weather", label: "Hava durumu kontrol ediliyor" },
-  { key: "discovery", label: "Yerler keşfediliyor" },
-  { key: "restaurant", label: "Restoran aranıyor" },
-  { key: "local-food", label: "Yerel lezzetler araştırılıyor" },
-  { key: "event", label: "Etkinlikler kontrol ediliyor" },
-  { key: "hidden-gem", label: "Gizli hazineler aranıyor" },
-  { key: "routing", label: "Rota hesaplanıyor" },
-  { key: "budget", label: "Bütçe optimize ediliyor" },
-  { key: "departure-safety", label: "Kalkış güvenliği kontrol ediliyor" },
-];
+/** A/B/C's three real, fixed presets (see trip-options.ts) — a short, honest "what this feels like" line so the choice reads as a real trade-off, not three unlabeled technical presets. */
+const PACE_FEEL: Record<TripOption["pace"], string> = {
+  max_experience: "Hızlı tempo, en çok yer",
+  balanced: "Dengeli tempo",
+  relaxed: "Rahat tempo, daha çok boş zaman",
+};
 
 function HomeContent() {
   const router = useRouter();
@@ -74,7 +68,10 @@ function HomeContent() {
   const [foodPreferences, setFoodPreferences] = useState("");
   const [planMode, setPlanMode] = useState<"single" | "options">("single");
 
-  // Natural language
+  // Natural language — a secondary, collapsed-by-default way in; the
+  // structured form below is the primary path (spec: it must not visually
+  // overpower the normal planning form).
+  const [nlOpen, setNlOpen] = useState(false);
   const [nlText, setNlText] = useState("");
   const [nlLoading, setNlLoading] = useState(false);
 
@@ -181,7 +178,9 @@ function HomeContent() {
           .filter(Boolean) as string[];
         setPreferences((prev) => Array.from(new Set([...prev, ...matched])));
       }
-      if (body.budget) { setBudget(String(body.budget)); setAdvancedOpen(true); }
+      if (body.budget) setBudget(String(body.budget));
+      // The structured form below now shows what was understood — hand focus back to it.
+      setNlOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sunucuya ulaşılamadı");
     } finally {
@@ -189,15 +188,10 @@ function HomeContent() {
     }
   }
 
-  function trackProgress(label: string) {
-    setProgress(label);
-    setSeenStages((prev) => {
-      const next = new Set(prev);
-      for (const stage of STAGE_CHECKLIST) {
-        if (label.includes(stage.key)) next.add(stage.key);
-      }
-      return next;
-    });
+  function trackProgress(rawLabel: string) {
+    setProgress(humanizeProgressLabel(rawLabel));
+    const stage = resolveProgressStage(rawLabel);
+    if (stage) setSeenStages((prev) => new Set(prev).add(stage.key));
   }
 
   function togglePreference(pref: string) {
@@ -315,36 +309,7 @@ function HomeContent() {
       </div>
 
       <div className="px-6 max-w-3xl mx-auto space-y-5">
-        {/* Natural language — an equally valid way in, not a footnote */}
-        <Card padding="lg" className="shadow-[var(--shadow-md)]">
-          <label htmlFor="nl-input" className="flex items-center gap-2 text-sm font-semibold mb-2">
-            <Wand2 size={16} className="text-primary" />
-            Gezini kendi cümlelerinle anlat
-          </label>
-          <textarea
-            id="nl-input"
-            value={nlText}
-            onChange={(e) => setNlText(e.target.value)}
-            rows={2}
-            placeholder={"or: “Paris, 3 gün. 10 Eylül saat 12:00’de CDG’ye iniyorum, 13 Eylül 18:00’de ayrılıyorum. Montmartre’da kalıyorum, 250€ bütçem var ve yürümeyi tercih ederim.”"}
-            className="w-full px-4 py-3 bg-surface border border-card-border rounded-2xl text-sm focus:outline-none focus:border-primary/50 resize-none"
-          />
-          <div className="flex items-center justify-between mt-2.5">
-            <p className="text-[11px] text-muted-fg">Aşağıdaki alanları doldurur — hiçbir şey otomatik gönderilmez.</p>
-            <Button type="button" variant="outline" size="sm" onClick={parseNaturalLanguage} disabled={nlLoading || !nlText.trim()}>
-              {nlLoading ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-              Anla
-            </Button>
-          </div>
-        </Card>
-
-        <div className="flex items-center gap-3 px-2">
-          <div className="flex-1 h-px bg-card-border" />
-          <span className="text-[11px] font-semibold text-muted uppercase tracking-wider">veya detayları gir</span>
-          <div className="flex-1 h-px bg-card-border" />
-        </div>
-
-        {/* Structured form */}
+        {/* Structured form is the primary path — large inputs, obvious CTA, few decisions at once */}
         <Card padding="lg">
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
@@ -367,6 +332,39 @@ function HomeContent() {
                   <span className="text-success flex items-center gap-1"><Check size={11} /> {resolvedDestination}</span>
                 )}
               </p>
+            </div>
+
+            {/* Natural language — secondary, collapsed by default so it never outweighs the form itself */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setNlOpen((v) => !v)}
+                className="flex items-center gap-1.5 text-xs font-medium text-muted-fg hover:text-primary transition-colors"
+                aria-expanded={nlOpen}
+              >
+                <Wand2 size={13} />
+                Kendi cümlelerinle de anlatabilirsin
+                <ChevronDown size={13} className={`transition-transform ${nlOpen ? "rotate-180" : ""}`} />
+              </button>
+              {nlOpen && (
+                <div className="mt-2.5 animate-fade-in">
+                  <textarea
+                    id="nl-input"
+                    value={nlText}
+                    onChange={(e) => setNlText(e.target.value)}
+                    rows={2}
+                    placeholder={"or: “Paris, 3 gün. 10 Eylül saat 12:00’de CDG’ye iniyorum, 13 Eylül 18:00’de ayrılıyorum. Montmartre’da kalıyorum, 250€ bütçem var ve yürümeyi tercih ederim.”"}
+                    className="w-full px-4 py-3 bg-surface border border-card-border rounded-2xl text-sm focus:outline-none focus:border-primary/50 resize-none"
+                  />
+                  <div className="flex items-center justify-between mt-2">
+                    <p className="text-[11px] text-muted-fg">Aşağıdaki alanları doldurur — hiçbir şey otomatik gönderilmez.</p>
+                    <Button type="button" variant="outline" size="sm" onClick={parseNaturalLanguage} disabled={nlLoading || !nlText.trim()}>
+                      {nlLoading ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
+                      Anla
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div>
@@ -441,6 +439,53 @@ function HomeContent() {
               </div>
             </div>
 
+            {/* Budget / pace / transport — real decisions a traveller makes up front, not implementation details, so they stay visible rather than hidden behind "advanced" */}
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div>
+                <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
+                  <Wallet size={12} /> Bütçe
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={budget}
+                  onChange={(e) => setBudget(e.target.value)}
+                  placeholder="opsiyonel"
+                  className="w-full px-3.5 py-2.5 bg-surface border border-card-border rounded-xl text-sm focus:outline-none focus:border-primary/50"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
+                  <Gauge size={12} /> Tempo
+                </label>
+                <div className="flex gap-1.5">
+                  {(Object.keys(PACE_PRESETS) as Pace[]).map((p) => (
+                    <button key={p} type="button" onClick={() => setPace(p)} aria-pressed={pace === p}
+                      className={`flex-1 px-2 py-2.5 rounded-xl text-xs font-medium border transition-all ${pace === p ? "bg-primary-light border-primary text-primary" : "bg-surface border-card-border"}`}>
+                      {PACE_PRESETS[p].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
+                  <TrainFront size={12} /> Ulaşım
+                </label>
+                <div className="flex gap-1.5">
+                  <button type="button" onClick={() => setProfile("foot")} aria-pressed={profile === "foot"}
+                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-2.5 rounded-xl text-xs font-medium border transition-all ${profile === "foot" ? "bg-primary-light border-primary text-primary" : "bg-surface border-card-border"}`}>
+                    <Footprints size={13} /> Yürü
+                  </button>
+                  <button type="button" onClick={() => setProfile("transit")} aria-pressed={profile === "transit"}
+                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-2.5 rounded-xl text-xs font-medium border transition-all ${profile === "transit" ? "bg-primary-light border-primary text-primary" : "bg-surface border-card-border"}`}>
+                    <TrainFront size={13} /> Toplu
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {/* Advanced — collapsed by default, real fields only */}
             <div className="border-t border-card-border pt-4">
               <button
@@ -455,73 +500,25 @@ function HomeContent() {
 
               {advancedOpen && (
                 <div className="mt-4 space-y-4 animate-fade-in">
-                  <div className="grid sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
-                        <HomeIcon size={12} /> Konaklama (opsiyonel)
-                      </label>
-                      <input
-                        type="text"
-                        value={accommodation}
-                        onChange={(e) => { setAccommodation(e.target.value); setAccommodationResolved(null); }}
-                        onBlur={resolveAccommodation}
-                        placeholder="or: Montmartre, otel adı"
-                        className="w-full px-3.5 py-2.5 bg-surface border border-card-border rounded-xl text-sm focus:outline-none focus:border-primary/50"
-                      />
-                      <p className="text-[11px] mt-1 min-h-[14px]" aria-live="polite">
-                        {accommodationChecking && <span className="text-muted-fg">Adres aranıyor…</span>}
-                        {!accommodationChecking && accommodationResolved && (
-                          <span className="text-success flex items-center gap-1"><Check size={11} /> {accommodationResolved.name}</span>
-                        )}
-                        {!accommodationChecking && accommodationError && <span className="text-danger">{accommodationError}</span>}
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
-                        <Wallet size={12} /> Bütçe (opsiyonel)
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={budget}
-                        onChange={(e) => setBudget(e.target.value)}
-                        placeholder="or: 250"
-                        className="w-full px-3.5 py-2.5 bg-surface border border-card-border rounded-xl text-sm focus:outline-none focus:border-primary/50"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
-                        <TrainFront size={12} /> Ulaşım tercihi
-                      </label>
-                      <div className="flex gap-1.5">
-                        <button type="button" onClick={() => setProfile("foot")}
-                          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-medium border transition-all ${profile === "foot" ? "bg-primary-light border-primary text-primary" : "bg-surface border-card-border"}`}>
-                          <Footprints size={13} /> Yürüyerek
-                        </button>
-                        <button type="button" onClick={() => setProfile("transit")}
-                          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-medium border transition-all ${profile === "transit" ? "bg-primary-light border-primary text-primary" : "bg-surface border-card-border"}`}>
-                          <TrainFront size={13} /> Toplu taşıma
-                        </button>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
-                        <Gauge size={12} /> Tempo
-                      </label>
-                      <div className="flex gap-1.5">
-                        {(Object.keys(PACE_PRESETS) as Pace[]).map((p) => (
-                          <button key={p} type="button" onClick={() => setPace(p)}
-                            className={`flex-1 px-2.5 py-2.5 rounded-xl text-xs font-medium border transition-all ${pace === p ? "bg-primary-light border-primary text-primary" : "bg-surface border-card-border"}`}>
-                            {PACE_PRESETS[p].label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-muted-fg uppercase tracking-wide flex items-center gap-1.5 mb-1">
+                      <HomeIcon size={12} /> Konaklama (opsiyonel)
+                    </label>
+                    <input
+                      type="text"
+                      value={accommodation}
+                      onChange={(e) => { setAccommodation(e.target.value); setAccommodationResolved(null); }}
+                      onBlur={resolveAccommodation}
+                      placeholder="or: Montmartre, otel adı"
+                      className="w-full px-3.5 py-2.5 bg-surface border border-card-border rounded-xl text-sm focus:outline-none focus:border-primary/50"
+                    />
+                    <p className="text-[11px] mt-1 min-h-[14px]" aria-live="polite">
+                      {accommodationChecking && <span className="text-muted-fg">Adres aranıyor…</span>}
+                      {!accommodationChecking && accommodationResolved && (
+                        <span className="text-success flex items-center gap-1"><Check size={11} /> {accommodationResolved.name}</span>
+                      )}
+                      {!accommodationChecking && accommodationError && <span className="text-danger">{accommodationError}</span>}
+                    </p>
                   </div>
 
                   <div className="grid sm:grid-cols-2 gap-3">
@@ -559,7 +556,7 @@ function HomeContent() {
                   <span>{progress}</span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {STAGE_CHECKLIST.map((s) => (
+                  {PLANNING_STAGES.map((s) => (
                     <span key={s.key} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${
                       seenStages.has(s.key) ? "bg-primary text-white" : "bg-surface text-muted"
                     }`}>
@@ -599,26 +596,29 @@ function HomeContent() {
                     type="button"
                     onClick={() => selectOption(opt)}
                     disabled={creating}
-                    className="text-left p-4 rounded-2xl border border-card-border bg-surface hover:border-primary/40 hover:shadow-[var(--shadow-sm)] transition-all disabled:opacity-40"
+                    className="text-left p-4 rounded-2xl border-2 border-card-border bg-surface hover:border-primary/50 hover:shadow-[var(--shadow-md)] transition-all disabled:opacity-40 flex flex-col"
                   >
-                    <p className="font-bold text-sm">{opt.label}</p>
-                    <p className="text-xs text-muted-fg mt-1">
-                      {opt.result.itinerary.stops.length} durak · {(opt.result.itinerary.totalDistanceMeters / 1000).toFixed(1)} km
+                    <p className="font-bold text-base">{opt.label}</p>
+                    <p className="text-xs text-primary font-medium mt-0.5">{PACE_FEEL[opt.pace]}</p>
+                    <p className="text-xs text-muted-fg mt-2">
+                      {opt.result.itinerary.stops.length} durak · {(opt.result.itinerary.totalDistanceMeters / 1000).toFixed(1)} km yürüyüş
                     </p>
                     {/* Real place names, not just a count — three numbers alone don't tell a traveller what's actually different between options. */}
                     <p className="text-[11px] text-muted-fg mt-1.5 line-clamp-2">
                       {opt.result.itinerary.stops.slice(0, 3).map((s) => s.name).join(" · ")}
                       {opt.result.itinerary.stops.length > 3 && " · ..."}
                     </p>
-                    {opt.result.hiddenGems.found.length > 0 && (
-                      <p className="text-[11px] text-accent mt-1">{opt.result.hiddenGems.found.length} gizli hazine</p>
-                    )}
-                    {opt.result.restaurant?.status === "scheduled" && (
-                      <p className="text-[11px] text-muted-fg mt-0.5">Restoran dahil</p>
-                    )}
-                    {!opt.result.itinerary.feasible && (
-                      <p className="text-[11px] text-warning mt-1">{opt.result.itinerary.conflicts.length} düzenleme gerekiyor</p>
-                    )}
+                    <div className="mt-auto pt-2.5">
+                      {opt.result.hiddenGems.found.length > 0 && (
+                        <p className="text-[11px] text-accent">{opt.result.hiddenGems.found.length} gizli hazine</p>
+                      )}
+                      {opt.result.restaurant?.status === "scheduled" && (
+                        <p className="text-[11px] text-muted-fg mt-0.5">Restoran dahil</p>
+                      )}
+                      {!opt.result.itinerary.feasible && (
+                        <p className="text-[11px] text-warning mt-1">Plan {opt.result.itinerary.conflicts.length} yerde düzenleme gerektiriyor</p>
+                      )}
+                    </div>
                   </button>
                 ))}
               </div>

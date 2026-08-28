@@ -7,6 +7,7 @@ import Link from "next/link";
 import {
   ArrowLeft, Clock, Footprints, Wallet, Cloud, CloudRain, Sun, CloudFog, CloudSnow, Zap,
   ShieldCheck, ShieldAlert, Sparkles, UtensilsCrossed, Gem, Star, AlertTriangle, Trash2, MapPin,
+  CalendarClock, Camera, Landmark, CloudOff,
 } from "lucide-react";
 import type { Place } from "@/lib/place-meta";
 import Card from "@/components/ui/Card";
@@ -14,6 +15,7 @@ import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
 import Skeleton from "@/components/ui/Skeleton";
 import type { DayResearchSummary, PersistedTrip } from "@/lib/autoplan-client";
+import { visitDurationMinutes, formatDuration, stopWeight, deriveDaySummary } from "@/lib/trip-format";
 
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
 
@@ -27,18 +29,6 @@ function formatKm(meters: number) {
 function formatWalk(seconds: number) {
   const m = Math.round(seconds / 60);
   return m < 1 ? "<1 dk" : `${m} dk`;
-}
-/** How long this stop is actually visited for — real, already-scheduled arrival/departure, just labeled instead of left as mental subtraction. */
-function visitDuration(arrivalTime?: string | null, departureTime?: string | null): string | null {
-  if (!arrivalTime || !departureTime) return null;
-  const [ah, am] = arrivalTime.split(":").map(Number);
-  const [dh, dm] = departureTime.split(":").map(Number);
-  if ([ah, am, dh, dm].some((n) => Number.isNaN(n))) return null;
-  const minutes = dh * 60 + dm - (ah * 60 + am);
-  if (minutes <= 0) return null;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h > 0 ? (m > 0 ? `${h}s ${m}dk` : `${h}s`) : `${m}dk`;
 }
 
 export default function TripDetailPage() {
@@ -152,22 +142,30 @@ export default function TripDetailPage() {
         </div>
       </div>
 
-      {/* Day tabs */}
+      {/* Day tabs — each carries its own real, derived summary so a traveller can tell days apart before clicking */}
       {totalDays > 1 && (
         <div className="px-6 max-w-6xl mx-auto mb-4">
           <div className="flex gap-2 overflow-x-auto hide-scrollbar">
-            {trip.days.map((d) => (
-              <button
-                key={d.id}
-                onClick={() => { setSelectedDay(d.dayNumber); setActiveStopIdx(null); }}
-                className={`shrink-0 px-4 py-2.5 rounded-2xl text-sm font-medium transition-all ${
-                  selectedDay === d.dayNumber ? "bg-primary text-white shadow-[var(--shadow-sm)]" : "bg-card border border-card-border hover:border-primary/30"
-                }`}
-              >
-                Gün {d.dayNumber}
-                <span className="block text-[10px] opacity-80">{d.date}</span>
-              </button>
-            ))}
+            {trip.days.map((d) => {
+              const summary = deriveDaySummary(d.activities, d.research as DayResearchSummary | null);
+              return (
+                <button
+                  key={d.id}
+                  onClick={() => { setSelectedDay(d.dayNumber); setActiveStopIdx(null); }}
+                  className={`shrink-0 px-4 py-2.5 rounded-2xl text-sm font-medium text-left transition-all max-w-[220px] ${
+                    selectedDay === d.dayNumber ? "bg-primary text-white shadow-[var(--shadow-sm)]" : "bg-card border border-card-border hover:border-primary/30"
+                  }`}
+                >
+                  Gün {d.dayNumber}
+                  <span className={`block text-[10px] ${selectedDay === d.dayNumber ? "opacity-80" : "text-muted-fg"}`}>{d.date}</span>
+                  {summary && (
+                    <span className={`block text-[11px] font-normal mt-0.5 truncate ${selectedDay === d.dayNumber ? "text-white/90" : "text-muted-fg"}`}>
+                      {summary}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -176,11 +174,13 @@ export default function TripDetailPage() {
       {research && (
         <div className="px-6 max-w-6xl mx-auto mb-5">
           <div className="flex flex-wrap gap-2">
-            {WeatherIcon && research.weather.forecast && (
+            {WeatherIcon && research.weather.forecast ? (
               <StatChip icon={<WeatherIcon size={13} />}>
                 {research.weather.forecast.temperatureMaxC != null ? `${Math.round(research.weather.forecast.temperatureMaxC)}°C` : ""} {conditionLabel(research.weather.forecast.condition)}
               </StatChip>
-            )}
+            ) : research.weather.status === "unavailable" ? (
+              <StatChip icon={<CloudOff size={13} />}>Bu tarih için hava tahmini yok</StatChip>
+            ) : null}
             <StatChip icon={<Footprints size={13} />}>{formatKm(research.totalDistanceMeters)} yürüyüş</StatChip>
             {research.costKnown && <StatChip icon={<Wallet size={13} />}>~{Math.round(research.totalCost)} beklenen harcama</StatChip>}
             <StatChip icon={<MapPin size={13} />}>{activities.length} durak</StatChip>
@@ -188,7 +188,7 @@ export default function TripDetailPage() {
               <StatChip icon={research.departureSafety.safe ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />} tone={research.departureSafety.safe ? "success" : "warning"}>
                 {research.departureSafety.safe
                   ? `${research.departureSafety.requestedDepartureTime} kalkış için güvenli`
-                  : `${research.departureSafety.overrunMinutes} dk gecikme riski`}
+                  : `Plan ${research.departureSafety.latestSafeArrivalTime}'te bitmeliydi, ${research.departureSafety.overrunMinutes} dk geç bitiyor`}
               </StatChip>
             )}
           </div>
@@ -319,6 +319,9 @@ function TimelineItem({
   const restaurant = isRestaurant ? research?.restaurant?.selected : undefined;
   const provenance = research?.provenance?.find((p) => p.name === activity.placeName);
 
+  const durationMinutes = visitDurationMinutes(activity.arrivalTime, activity.departureTime);
+  const weight = stopWeight(durationMinutes);
+
   return (
     <button onClick={onSelect} className="w-full text-left">
       <Card
@@ -331,15 +334,20 @@ function TimelineItem({
             <div className="w-7 h-7 rounded-full bg-primary text-white flex items-center justify-center text-[11px] font-bold">{index + 1}</div>
           </div>
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 text-muted-fg">
+            <div className="flex items-center gap-2 flex-wrap text-muted-fg">
               <Clock size={12} />
-              <span className="text-xs font-medium">{activity.arrivalTime ?? activity.timeSlot.split("-")[0]}
+              <span className="text-xs font-medium text-foreground">{activity.arrivalTime ?? activity.timeSlot.split("-")[0]}
                 {activity.departureTime ? `–${activity.departureTime}` : ""}
               </span>
-              {visitDuration(activity.arrivalTime, activity.departureTime) && (
-                <span className="text-[11px] text-muted">({visitDuration(activity.arrivalTime, activity.departureTime)})</span>
+              {durationMinutes != null && (
+                // Visual rhythm: a 5-minute photo stop and a 75-minute museum should not read the same way.
+                <span className={`inline-flex items-center gap-1 ${weight === "major" ? "text-xs font-semibold text-primary" : "text-[11px] text-muted"}`}>
+                  {weight === "major" && <Landmark size={11} />}
+                  {weight === "quick" && <Camera size={11} />}
+                  {formatDuration(durationMinutes)} ziyaret
+                </span>
               )}
-              {fixedEvent && <Badge variant="accent">Sabit Saat</Badge>}
+              {fixedEvent && <Badge variant="accent"><CalendarClock size={9} /> Etkinlik</Badge>}
               {hiddenGem && <Badge variant="accent"><Gem size={9} /> Gizli Hazine</Badge>}
               {isRestaurant && <Badge variant="warning"><UtensilsCrossed size={9} /> Restoran</Badge>}
             </div>
@@ -378,21 +386,33 @@ function TimelineItem({
   );
 }
 
+const TOURIST_TRAP_LABEL: Record<string, string> = { HIGH: "Yoğun turistik bölge", MEDIUM: "Turistik bölge" };
+const MEAL_WINDOW_LABEL: Record<string, string> = { lunch: "Öğle yemeği", dinner: "Akşam yemeği" };
+
 function RestaurantDetail({ restaurant }: { restaurant: NonNullable<DayResearchSummary["restaurant"]["selected"]> }) {
   const topItem = restaurant.menuItems.find((m) => m.price != null) ?? restaurant.menuItems[0];
+  const hoursVerified = restaurant.openingHoursSource !== "unverified";
   return (
     <div className="mt-1.5 space-y-1">
       <div className="flex items-center gap-2 flex-wrap text-xs text-muted-fg">
-        {restaurant.cuisine && <span>{restaurant.cuisine}</span>}
+        <span>{MEAL_WINDOW_LABEL[restaurant.mealWindow] ?? restaurant.mealWindow}</span>
+        {restaurant.cuisine && <span>· {restaurant.cuisine}</span>}
         {restaurant.estimatedMealCost != null && (
           <span className="font-medium text-foreground">
             ~{restaurant.estimatedMealCost}{restaurant.currency ?? ""}
           </span>
         )}
         {restaurant.touristTrapRisk !== "UNKNOWN" && restaurant.touristTrapRisk !== "LOW" && (
-          <Badge variant={restaurant.touristTrapRisk === "HIGH" ? "danger" : "warning"}>Turist yoğunluğu: {restaurant.touristTrapRisk}</Badge>
+          <Badge variant={restaurant.touristTrapRisk === "HIGH" ? "danger" : "warning"}>{TOURIST_TRAP_LABEL[restaurant.touristTrapRisk]}</Badge>
         )}
       </div>
+      {/* Same honest hours-verified line attractions already get — the backend has this fact for the selected restaurant too, the card just never showed it. */}
+      <p className="text-[11px]">
+        <span className={hoursVerified ? "text-success" : "text-muted"}>
+          {hoursVerified ? "Açılış saati doğrulandı" : "Açılış saati doğrulanamadı"}
+        </span>
+        {restaurant.estimatedMealCost == null && <span className="text-muted-fg"> · Fiyat doğrulanamadı</span>}
+      </p>
       {topItem && (
         <p className="text-xs">
           <Star size={10} className="inline text-secondary mr-1" />
