@@ -53,8 +53,17 @@ export function classifyOsmPlace(osmTag: string, osmValue: string): string {
  * same way a museum would and get scheduled as a stop with its own visit
  * window. `mustSeeNames` is the one legitimate way a caller can still ask
  * for one by name (spec: "only show it as a stop if explicitly asked for").
+ *
+ * `restaurant` is here because the dedicated restaurant module
+ * (restaurant.ts) already selects one meal stop for the day, meal-window
+ * aware. A notable restaurant (e.g. a Michelin-starred, dinner-only place
+ * with wikidata/website/phone tags) that also lands in the sightseeing
+ * shortlist gets scheduled as an ordinary stop with its raw OSM hours —
+ * live-observed: "La Degustation Bohême Bourgeoise" (opens 18:00) inserted
+ * as a sightseeing stop, forcing ~4.5 h of idle waiting before it on a day
+ * whose real meal was already covered elsewhere.
  */
-export const NON_SIGHTSEEING_CATEGORIES = new Set(["accommodation", "transport"]);
+export const NON_SIGHTSEEING_CATEGORIES = new Set(["accommodation", "transport", "restaurant"]);
 
 export function isSightseeingCandidate(
   candidate: Pick<ScoredCandidate, "category" | "place">,

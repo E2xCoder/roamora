@@ -139,6 +139,19 @@ describe("isSightseeingCandidate", () => {
     expect(isSightseeingCandidate(candidate("museum"))).toBe(true);
   });
 
+  it("rejects a restaurant from the general sightseeing shortlist (the meal module handles meals)", () => {
+    // Real regression: a notable dinner-only restaurant ("La Degustation
+    // Bohême Bourgeoise", opens 18:00) won a shortlist slot on its OSM
+    // notability tags and was scheduled as a sightseeing stop, forcing hours
+    // of idle waiting before it.
+    expect(isSightseeingCandidate(candidate("restaurant", "La Degustation Bohême Bourgeoise"))).toBe(false);
+  });
+
+  it("still allows a landmark restaurant through when the caller names it as a must-see", () => {
+    const r = candidate("restaurant", "Café Louvre");
+    expect(isSightseeingCandidate(r, ["Café Louvre"])).toBe(true);
+  });
+
   it("allows a non-sightseeing place through only when explicitly requested by name", () => {
     const hotel = candidate("accommodation", "Hotel Paříž");
     expect(isSightseeingCandidate(hotel, ["Hotel Paříž"])).toBe(true);

@@ -4,6 +4,7 @@ import {
   restaurantStopInput,
   researchRestaurant,
   preScoreRestaurantCandidate,
+  estimateMealWaitMinutes,
   looksLikeRealMenu,
   type RestaurantCandidateResult,
   type RestaurantResearchParams,
@@ -196,6 +197,145 @@ describe("researchRestaurant", () => {
       expect(result.considered.some((c) => c.name === "Notable Farther")).toBe(true);
     }
   );
+});
+
+describe("estimateMealWaitMinutes", () => {
+  const lunch = { name: "lunch" as const, earliest: "12:00", latest: "14:30" };
+  const dinner = { name: "dinner" as const, earliest: "18:00", latest: "21:00" };
+
+  it("reports a large idle wait for dinner on a short day (few stops, done by early afternoon)", () => {
+    // 2 stops, 75 min of visits: projected ≈ 75 + 2×15 = 105 min → natural
+    // dinner arrival ≈ 09:00 + 1:45 = 10:45, dinner opens 18:00 → ~435 min wait.
+    expect(estimateMealWaitMinutes(dinner, "09:00", 2, 75)).toBeGreaterThan(360);
+  });
+
+  it("reports a much smaller wait for lunch than dinner on that same short day", () => {
+    const lunchWait = estimateMealWaitMinutes(lunch, "09:00", 2, 75);
+    const dinnerWait = estimateMealWaitMinutes(dinner, "09:00", 2, 75);
+    expect(lunchWait).toBeLessThan(dinnerWait);
+  });
+
+  it("reports zero idle wait for dinner on a full day that naturally reaches dinner time", () => {
+    // 10 stops, 480 min of visits: projected ≈ 480 + 150 = 630 → natural dinner
+    // arrival ≈ 09:00 + 10:30 = 19:30, already past the 18:00 opening.
+    expect(estimateMealWaitMinutes(dinner, "09:00", 10, 480)).toBe(0);
+  });
+});
+
+describe("researchRestaurant — meal-window fit (real Prague 'relaxed' regression)", () => {
+  // 2026-09-29 is a Tuesday; "Tu-Sa …" restaurants are open.
+  const TUESDAY = new Date("2026-09-29T12:00:00");
+
+  // The exact live shape: a marquee, OSM-houred, DINNER-ONLY restaurant
+  // ("La Degustation Bohême Bourgeoise", Michelin, opens 18:00) competing
+  // against an ordinary lunch-capable place, on a 3-stop "relaxed" day whose
+  // sightseeing (svatý Duch 15 min + Pražský Hrad 60 min) is done well before
+  // noon. Picking the dinner-only spot injected ~440 min of dead waiting.
+  const dinnerOnlyNotable = () =>
+    candidate({ name: "La Degustation", tags: { opening_hours: "Tu-Sa 18:00-22:00" }, ...offsetMeters(120) }, 5);
+  const lunchCapablePlain = () =>
+    candidate({ name: "Lokál Dlouhá", tags: { opening_hours: "Mo-Su 11:00-23:00" }, ...offsetMeters(140) }, 1);
+
+  const SHORT_DAY = { plannedStopCount: 2, plannedVisitMinutes: 75, arrivalTime: "09:00", dayEnd: "19:00" as const };
+
+  it("reproduces the bug without schedule context: the notable dinner-only spot is chosen despite the gap", async () => {
+    // No plannedStopCount/plannedVisitMinutes → meal-window term is inert,
+    // exactly the pre-fix behavior.
+    const result = await researchRestaurant(
+      baseParams({
+        restaurantCandidates: [dinnerOnlyNotable(), lunchCapablePlain()],
+        tripDate: TUESDAY,
+        arrivalTime: "09:00",
+        dayEnd: "19:00",
+      })
+    );
+    expect(result.selected?.name).toBe("La Degustation");
+    expect(result.selected?.mealWindow).toBe("dinner");
+    expect(result.considered.every((c) => c.scoreBreakdown.mealWindowFit === 0)).toBe(true);
+  });
+
+  it("with schedule context on a short day, prefers the lunch-capable restaurant over the dinner-only one", async () => {
+    const result = await researchRestaurant(
+      baseParams({ restaurantCandidates: [dinnerOnlyNotable(), lunchCapablePlain()], tripDate: TUESDAY, ...SHORT_DAY })
+    );
+    expect(result.selected?.name).toBe("Lokál Dlouhá");
+    expect(result.selected?.mealWindow).toBe("lunch");
+    const dinner = result.considered.find((c) => c.name === "La Degustation")!;
+    expect(dinner.scoreBreakdown.mealWindowFit).toBeLessThan(0);
+    expect(result.selected?.scoreBreakdown.mealWindowFit).toBe(0); // the best-fitting window is never penalised
+  });
+
+  it("still selects a genuinely better dinner restaurant when the day naturally reaches dinner", async () => {
+    const FULL_DAY = { plannedStopCount: 10, plannedVisitMinutes: 480, arrivalTime: "09:00", dayEnd: "22:00" as const };
+    const result = await researchRestaurant(
+      baseParams({ restaurantCandidates: [dinnerOnlyNotable(), lunchCapablePlain()], tripDate: TUESDAY, ...FULL_DAY })
+    );
+    expect(result.selected?.name).toBe("La Degustation");
+    expect(result.considered.every((c) => c.scoreBreakdown.mealWindowFit === 0)).toBe(true);
+  });
+
+  it("does not penalise a lunch-only restaurant — its window is the day's best-fitting one", async () => {
+    const lunchOnly = candidate({ name: "Midday Bistro", tags: { opening_hours: "Mo-Su 11:30-15:00" } }, 0);
+    const result = await researchRestaurant(
+      baseParams({ restaurantCandidates: [lunchOnly], tripDate: TUESDAY, ...SHORT_DAY })
+    );
+    expect(result.selected?.name).toBe("Midday Bistro");
+    expect(result.selected?.mealWindow).toBe("lunch");
+    expect(result.selected?.scoreBreakdown.mealWindowFit).toBe(0);
+  });
+
+  it("does not penalise a lunch+dinner restaurant — it is scheduled at lunch, which fits", async () => {
+    const both = candidate({ name: "All Day Kitchen", tags: { opening_hours: "Mo-Su 11:00-23:00" } }, 0);
+    const result = await researchRestaurant(
+      baseParams({ restaurantCandidates: [both], tripDate: TUESDAY, ...SHORT_DAY })
+    );
+    expect(result.selected?.mealWindow).toBe("lunch");
+    expect(result.selected?.scoreBreakdown.mealWindowFit).toBe(0);
+  });
+
+  it("does not penalise a restaurant whose opening hours are unknown (no proven gap to charge for)", async () => {
+    const unknownHours = candidate({ name: "Unlabelled Diner" }, 0);
+    const result = await researchRestaurant(
+      baseParams({ restaurantCandidates: [unknownHours], tripDate: TUESDAY, ...SHORT_DAY })
+    );
+    expect(result.selected?.name).toBe("Unlabelled Diner");
+    expect(result.selected?.scoreBreakdown.mealWindowFit).toBe(0);
+  });
+
+  it("preserves an explicit cuisine preference: a dinner-only match still beats a non-matching lunch place on a short day", async () => {
+    const koreanDinnerOnly = candidate(
+      { name: "Hansik House", tags: { opening_hours: "Mo-Su 17:30-23:00", cuisine: "korean" }, ...offsetMeters(120) },
+      0
+    );
+    const italianLunch = candidate(
+      { name: "Trattoria", tags: { opening_hours: "Mo-Su 11:00-23:00", cuisine: "italian" }, ...offsetMeters(120) },
+      0
+    );
+    const result = await researchRestaurant(
+      baseParams({
+        restaurantCandidates: [koreanDinnerOnly, italianLunch],
+        tripDate: TUESDAY,
+        foodPreferences: ["korean"],
+        ...SHORT_DAY,
+      })
+    );
+    expect(result.selected?.name).toBe("Hansik House");
+    // The gap penalty is softened (halved) but not erased when the cuisine matches.
+    const korean = result.considered.find((c) => c.name === "Hansik House")!;
+    expect(korean.scoreBreakdown.mealWindowFit).toBeLessThan(0);
+    expect(korean.scoreBreakdown.cuisineRelevance).toBeGreaterThan(0);
+  });
+
+  it("preserves price/source scoring: an over-budget restaurant is still down-weighted regardless of meal window", async () => {
+    const result = await researchRestaurant(
+      baseParams({ restaurantCandidates: [lunchCapablePlain()], tripDate: TUESDAY, ...SHORT_DAY }),
+    );
+    // priceFit stays the neutral default (no cost known, no budget) — the new
+    // term is additive and does not disturb the existing breakdown keys.
+    expect(result.selected?.scoreBreakdown.priceFit).toBe(10);
+    expect(result.selected?.scoreBreakdown).toHaveProperty("routeCompat");
+    expect(result.selected?.scoreBreakdown).toHaveProperty("openingHoursFit");
+  });
 });
 
 function menuItem(overrides: Partial<MenuItemResult> = {}): MenuItemResult {

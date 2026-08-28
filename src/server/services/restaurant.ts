@@ -311,11 +311,55 @@ export interface RestaurantResearchParams {
   foodPreferences?: string[];
   remainingBudget?: number;
   currency?: string;
+  /**
+   * Minimal, deterministic schedule context (the sightseeing/event stops
+   * already selected for the day, before this restaurant is inserted among
+   * them) — used only by the meal-window-fit term below to prefer a meal
+   * window the day naturally reaches over one that injects hours of idle
+   * waiting. Both absent → the term is 0 and selection is unchanged.
+   */
+  plannedStopCount?: number;
+  plannedVisitMinutes?: number;
 }
 
 const MAX_RESTAURANT_RESEARCH_CALLS = 5;
 const CANDIDATE_POOL_SIZE = 8; // candidates actually researched (real network calls), bounding real cost
 const DISTANCE_SHORTLIST_SIZE = 24; // cheap, no-network candidates considered for the pre-score below
+
+/**
+ * Rough per-stop city-hop time added on top of raw visit minutes when
+ * projecting how far into the day the traveller has progressed — the same
+ * order of magnitude the optimizer's realism factor adds for crossings,
+ * photos and wrong turns, without needing the real OSRM matrix here.
+ */
+const PER_STOP_CITY_HOP_MIN = 15;
+/** Lunch falls around the midpoint of the day's sightseeing; dinner at the end. */
+const MEAL_DAY_FRACTION: Record<MealWindow["name"], number> = { lunch: 0.5, dinner: 1 };
+/** One penalty point per this many minutes of *excess* idle wait (beyond the day's unavoidable minimum). */
+const EXCESS_WAIT_MIN_PER_POINT = 20;
+/** Cap on the meal-window-fit penalty — a bit above the notability term (max +10), below a cuisine match (+15) or a HIGH tourist-trap hit (−25). */
+const MAX_MEAL_WINDOW_PENALTY = 20;
+
+/**
+ * Deterministic estimate (no optimizer run, no network) of how many minutes
+ * the traveller would spend idle-waiting for `window` to open if this meal
+ * window were chosen. The restaurant is inserted into the day's route; the
+ * forced wait is `window.earliest − (when the traveller naturally reaches the
+ * meal slot)`, floored at 0. "Naturally reaches" is `dayStart + fraction ×
+ * projectedSightseeingMinutes`, fraction from MEAL_DAY_FRACTION, and
+ * `projectedSightseeingMinutes` is the planned visit time plus a flat
+ * ~15 min/stop hop allowance.
+ */
+export function estimateMealWaitMinutes(
+  window: MealWindow,
+  dayStart: string,
+  plannedStopCount: number,
+  plannedVisitMinutes: number
+): number {
+  const projected = plannedVisitMinutes + plannedStopCount * PER_STOP_CITY_HOP_MIN;
+  const naturalArrival = toMinutes(dayStart) + projected * MEAL_DAY_FRACTION[window.name];
+  return Math.max(0, toMinutes(window.earliest) - naturalArrival);
+}
 
 /**
  * Free, no-network pre-score used only to decide WHICH candidates are worth
@@ -623,6 +667,29 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     }
     breakdown.touristTrapAdjustment = touristTrapRisk === "HIGH" ? -25 : touristTrapRisk === "MEDIUM" ? -10 : 0;
     breakdown.notability = Math.min(10, candidate.notabilityScore * 2);
+
+    // --- meal-window fit: down-weight a window that strands the traveller ---
+    // A dinner-only restaurant on a day whose sightseeing is done by early
+    // afternoon means hours of idle waiting before the meal (the real Prague
+    // "relaxed" case: a marquee dinner-only spot chosen for a 3-stop day, ~440
+    // min of dead time before it). Penalise a candidate only by how much MORE
+    // idle wait its window costs than the best window the day can reach —
+    // so the best-fitting window is never penalised, and a day that naturally
+    // reaches dinner (enough stops to fill the afternoon) penalises nothing.
+    breakdown.mealWindowFit = 0;
+    if (params.plannedStopCount != null && params.plannedVisitMinutes != null && windows.length > 0) {
+      const waitFor = (w: MealWindow) =>
+        estimateMealWaitMinutes(w, params.arrivalTime, params.plannedStopCount!, params.plannedVisitMinutes!);
+      const minAchievableWait = Math.min(...windows.map(waitFor));
+      const excessWait = Math.max(0, waitFor(usableWindow) - minAchievableWait);
+      let penalty = Math.min(MAX_MEAL_WINDOW_PENALTY, Math.round(excessWait / EXCESS_WAIT_MIN_PER_POINT));
+      // A stated cuisine-preference match means this specific restaurant is
+      // wanted — a longer pre-meal gap is a worse trade-off, not a
+      // disqualifier — so the penalty is softened, never erased.
+      if (breakdown.cuisineRelevance > 0) penalty = Math.round(penalty / 2);
+      breakdown.mealWindowFit = penalty === 0 ? 0 : -penalty;
+    }
+
     const score = Object.values(breakdown).reduce((s, v) => s + v, 0);
 
     const reasonParts: string[] = [];
@@ -630,6 +697,7 @@ export async function researchRestaurant(params: RestaurantResearchParams): Prom
     if (openingSource !== "unverified") reasonParts.push(`açılış saati ${openingSource === "osm" ? "OSM'den" : "web araştırmasından"} doğrulandı`);
     if (menuItems.length > 0) reasonParts.push(`${menuItems.length} menü öğesi bulundu`);
     if (touristTrapRisk !== "UNKNOWN" && touristTrapRisk !== "LOW") reasonParts.push(`turist tuzağı riski: ${touristTrapRisk}`);
+    if (breakdown.mealWindowFit < 0) reasonParts.push(`öğün penceresi (${usableWindow.name}) güne tam oturmuyor — yemekten önce beklenen boşta bekleme yüksek`);
 
     considered.push({
       stopId: p.id,

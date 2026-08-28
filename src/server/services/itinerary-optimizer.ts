@@ -114,7 +114,7 @@ const DEFAULT_VISIT_MINUTES: Record<string, number> = {
 };
 const FALLBACK_VISIT_MINUTES = 20;
 
-function visitMinutesFor(stop: StopInput): number {
+export function visitMinutesFor(stop: StopInput): number {
   if (stop.visitMinutes != null) return stop.visitMinutes;
   if (stop.category && DEFAULT_VISIT_MINUTES[stop.category] != null) {
     return DEFAULT_VISIT_MINUTES[stop.category];
@@ -175,13 +175,13 @@ export function optimizeItinerary(
 
   // --- 2. cheapest feasible insertion for every flexible stop --------------
   for (const { stop, matrixIndex } of flexible) {
-    let best: { position: number; extraCost: number } | null = null;
+    let best: { position: number; softCost: number; extraCost: number } | null = null;
 
     // Try every gap in the current route (after index 0, i.e. never before
     // the start point).
     for (let pos = 1; pos <= route.length; pos++) {
       const candidate = [...route.slice(0, pos), matrixIndex, ...route.slice(pos)];
-      const sim = simulate(candidate, placed, matrixIndex, stop, matrix, dayStartMin, realism);
+      const sim = simulate(candidate, placed, matrixIndex, stop, matrix, dayStartMin, dayEndMin, realism);
       if (!sim.feasible) continue;
 
       const prev = route[pos - 1];
@@ -190,7 +190,20 @@ export function optimizeItinerary(
         matrix.distances[prev][matrixIndex] +
         (next != null ? matrix.distances[matrixIndex][next] - matrix.distances[prev][next] : 0);
 
-      if (!best || extra < best.extraCost) best = { position: pos, extraCost: extra };
+      // Lexicographic objective: an ordering that misses fewer closing times
+      // (and overruns the day less) always wins; walking distance only breaks
+      // ties between equally constraint-safe positions. Without the softCost
+      // term a dinner-only restaurant anchored to 18:00 gets inserted at the
+      // distance-cheapest gap — often the very first one — stranding every
+      // earlier-closing sightseeing stop on the wrong side of the meal slot
+      // even when a fully feasible order exists (real Prague autoplan case).
+      if (
+        !best ||
+        sim.softCost < best.softCost ||
+        (sim.softCost === best.softCost && extra < best.extraCost)
+      ) {
+        best = { position: pos, softCost: sim.softCost, extraCost: extra };
+      }
     }
 
     if (best) {
@@ -208,7 +221,7 @@ export function optimizeItinerary(
   }
 
   // --- 3. bounded 2-opt over non-anchored, adjacent-swappable pairs -------
-  route = twoOptImprove(route, placed, matrix, dayStartMin, realism);
+  route = twoOptImprove(route, placed, matrix, dayStartMin, dayEndMin, realism);
 
   // --- 4. final schedule simulation, keeping every conflict, not just the
   //        first one — the user needs to see the whole picture at once ----
@@ -314,15 +327,22 @@ interface SimStep {
 }
 
 /**
- * Simulates a full route's schedule and reports whether every HARD
- * constraint holds — meaning `fixedTime` only.
+ * Simulates a full route's schedule and reports (a) whether every HARD
+ * constraint holds — meaning `fixedTime` only — and (b) a `softCost`: the
+ * total number of minutes by which the route misses `latestTime` cutoffs and
+ * overruns the day. `softCost` is what lets the construction and 2-opt passes
+ * prefer a closing-time-safe ordering over a merely shorter one.
  *
- * `latestTime` is deliberately not a gate here. Treating it as one meant a
+ * `latestTime` is deliberately not a hard gate. Treating it as one meant a
  * stop that could not make its own cutoff from any position was excluded
  * from the plan entirely (kind "unplaceable") instead of being placed at its
  * best slot and flagged with the specific, more informative
  * "latest-time-missed" conflict the final pass reports. `earliestTime` is
  * likewise never a gate — it only pushes the arrival forward to a wait.
+ *
+ * The `latestTime` penalty is measured against the RAW arrival (before any
+ * earliest-time wait is applied), matching how the final conflict pass in
+ * `optimizeItinerary` decides a "latest-time-missed".
  */
 function simulate(
   route: number[],
@@ -331,21 +351,26 @@ function simulate(
   probeStop: StopInput | null,
   matrix: { durations: number[][]; distances: number[][] },
   dayStartMin: number,
+  dayEndMin: number,
   realism: number
-): { feasible: boolean } {
+): { feasible: boolean; softCost: number } {
   let cursor = dayStartMin;
   let prev = route[0];
+  let softCost = 0;
 
   for (let i = 1; i < route.length; i++) {
     const idx = route[i];
     const stop = idx === probeIndex ? probeStop! : placed.get(idx)!;
     const travelSec = matrix.durations[prev][idx] * realism;
-    let arrival = cursor + travelSec / 60;
+    const rawArrival = cursor + travelSec / 60;
+    let arrival = rawArrival;
+
+    if (stop.latestTime) softCost += Math.max(0, rawArrival - toMinutes(stop.latestTime));
 
     if (stop.earliestTime) arrival = Math.max(arrival, toMinutes(stop.earliestTime));
     if (stop.fixedTime) {
       const target = toMinutes(stop.fixedTime);
-      if (arrival > target + 1) return { feasible: false }; // arrives too late for the appointment
+      if (arrival > target + 1) return { feasible: false, softCost: Infinity }; // arrives too late for the appointment
       arrival = target;
     }
 
@@ -353,7 +378,8 @@ function simulate(
     prev = idx;
   }
 
-  return { feasible: true };
+  softCost += Math.max(0, cursor - dayEndMin);
+  return { feasible: true, softCost };
 }
 
 function buildSchedule(
@@ -412,6 +438,7 @@ function twoOptImprove(
   placed: Map<number, StopInput>,
   matrix: { durations: number[][]; distances: number[][] },
   dayStartMin: number,
+  dayEndMin: number,
   realism: number
 ): number[] {
   const isMovable = (idx: number) => {
@@ -431,11 +458,20 @@ function twoOptImprove(
       const swapped = [...route];
       [swapped[i], swapped[i + 1]] = [swapped[i + 1], swapped[i]];
 
+      const simAfter = simulate(swapped, placed, null, null, matrix, dayStartMin, dayEndMin, realism);
+      if (!simAfter.feasible) continue;
+      const simBefore = simulate(route, placed, null, null, matrix, dayStartMin, dayEndMin, realism);
+
       const before = routeDistance(route, matrix);
       const after = routeDistance(swapped, matrix);
-      if (after >= before) continue;
 
-      if (simulate(swapped, placed, null, null, matrix, dayStartMin, realism).feasible) {
+      // Same lexicographic objective as the construction pass: a swap that
+      // reduces missed closing times / day-overrun is taken even if it adds
+      // walking; otherwise a swap is taken only when it shortens the walk
+      // without making any closing time worse.
+      const improvesSoftCost = simAfter.softCost < simBefore.softCost;
+      const improvesDistance = simAfter.softCost === simBefore.softCost && after < before;
+      if (improvesSoftCost || improvesDistance) {
         route = swapped;
         improved = true;
       }

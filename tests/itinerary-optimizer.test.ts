@@ -202,6 +202,89 @@ describe("optimizeItinerary — cost", () => {
   });
 });
 
+describe("optimizeItinerary — upper time windows influence ordering (TSPTW)", () => {
+  // Real regression (autoplan.ts restaurant + optimizer interaction). A live
+  // Prague "relaxed" autoplan produced exactly this 3-stop set:
+  //   - "La Degustation Bohême Bourgeoise" — a dinner-only restaurant, so
+  //     autoplan anchors it to the dinner window (earliest 18:00).
+  //   - "svatý Duch" — a church that closes at 17:00 (latestTime 17:00).
+  //   - "Pražský Hrad" — the castle, no time constraint.
+  // The optimizer scheduled the restaurant FIRST (≈530 min of dead wait before
+  // it), which forced the church to be visited AFTER dinner — arrival 19:08,
+  // 2+ hours past its own closing time — and overran the day. A feasible order
+  // exists and is not even exotic: church → castle → restaurant. The solver
+  // never found it because `latestTime` misses and day-overrun affected
+  // neither the cheapest-insertion position choice nor the 2-opt objective —
+  // both were driven by walking distance alone.
+  function pragueRelaxedReq() {
+    // start(0) -- Restaurant(300m) -- Church(600m) -- Castle(1200m), colinear.
+    // Submitted restaurant-first; matrix indices follow submission order.
+    const matrix = lineMatrix([0, 300, 600, 1200]);
+    const req = baseReq(
+      [
+        stop("Restaurant", { earliestTime: "18:00", latestTime: "21:00", visitMinutes: 60 }),
+        stop("Church", { latestTime: "17:00", visitMinutes: 15 }),
+        stop("Castle", { visitMinutes: 60 }),
+      ],
+      { dayStart: "09:00", dayEnd: "19:00" }
+    );
+    return { matrix, req };
+  }
+
+  it("does not strand an earlier-closing stop after a late fixed meal slot when a feasible order exists", () => {
+    const { matrix, req } = pragueRelaxedReq();
+
+    const result = optimizeItinerary(req, matrix);
+
+    const order = result.stops.map((s) => s.id);
+    const churchIdx = order.indexOf("Church");
+    const restaurantIdx = order.indexOf("Restaurant");
+    const castleIdx = order.indexOf("Castle");
+
+    // The church (closes 17:00) must come before the 18:00 dinner slot.
+    expect(churchIdx).toBeLessThan(restaurantIdx);
+    expect(castleIdx).toBeLessThan(restaurantIdx);
+    expect(result.conflicts.some((c) => c.kind === "latest-time-missed")).toBe(false);
+    expect(result.conflicts.some((c) => c.kind === "day-overrun")).toBe(false);
+    expect(result.feasible).toBe(true);
+  });
+
+  it("still keeps the stop and flags it when NO ordering can satisfy its closing time", () => {
+    // Church is 50 km from everything: unreachable before 17:00 from any slot.
+    const distances = [
+      [0, 300, 50_000, 1200],
+      [300, 0, 50_000, 900],
+      [50_000, 50_000, 0, 50_000],
+      [1200, 900, 50_000, 0],
+    ];
+    const durations = distances.map((row) => row.map((d) => d / 1.4));
+    const req = baseReq(
+      [
+        stop("Restaurant", { earliestTime: "18:00", latestTime: "21:00", visitMinutes: 60 }),
+        stop("Church", { latestTime: "17:00", visitMinutes: 15 }),
+        stop("Castle", { visitMinutes: 60 }),
+      ],
+      { dayStart: "09:00", dayEnd: "23:00" }
+    );
+
+    const result = optimizeItinerary(req, { distances, durations });
+
+    // Not dropped — still present, just flagged (the "flag, don't drop" rule).
+    expect(result.stops.some((s) => s.id === "Church")).toBe(true);
+    expect(result.conflicts.some((c) => c.kind === "latest-time-missed" && c.stopName === "Church")).toBe(true);
+  });
+
+  it("prefers the closing-time-safe order even when it means slightly more walking", () => {
+    const { matrix, req } = pragueRelaxedReq();
+    const result = optimizeItinerary(req, matrix);
+    // church→castle→restaurant walks start→600→1200→300 = 600+600+900 = 2100 m,
+    // vs the distance-greedy restaurant→church→castle = 300+300+600 = 1200 m.
+    // The solver must accept the longer walk to keep the church's closing time.
+    expect(result.totalDistanceMeters).toBeGreaterThan(1200);
+    expect(result.feasible).toBe(true);
+  });
+});
+
 describe("optimizeItinerary — day overrun", () => {
   it("flags a day that runs past its end time instead of pretending it fits", () => {
     const matrix = lineMatrix([0, 100]);

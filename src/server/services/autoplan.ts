@@ -34,6 +34,7 @@ import { fetchDailyForecast, isBadWeatherDay, type WeatherForecast } from "@/ser
 import { applyWeatherWeights, isOutdoorCategory } from "@/server/services/weather-routing";
 import {
   optimizeItinerary,
+  visitMinutesFor,
   type StopInput,
   type OptimizeResult,
 } from "@/server/services/itinerary-optimizer";
@@ -1064,6 +1065,11 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       : center;
   const spentSoFar = finalStops.reduce((s, x) => s + (x.input.estimatedCost ?? 0), 0);
   const remainingBudget = req.budget != null ? Math.max(0, req.budget - spentSoFar) : undefined;
+  // Minimal, deterministic schedule context for restaurant meal-window fit —
+  // the stops already chosen for the day, before the restaurant is inserted
+  // among them. Lets selection avoid a dinner-only place on a day whose
+  // sightseeing finishes by early afternoon (see restaurant.ts).
+  const plannedVisitMinutes = finalStops.reduce((s, x) => s + visitMinutesFor(x.input), 0);
 
   const [restaurant, localFood] = await Promise.all([
     researchRestaurant({
@@ -1078,6 +1084,8 @@ export async function autoplan(req: AutoplanRequest, opts?: AutoplanRunOptions):
       foodPreferences: req.foodPreferences,
       remainingBudget,
       currency: req.currency,
+      plannedStopCount: finalStops.length,
+      plannedVisitMinutes,
     }),
     researchLocalFood(req.destination, searchAvailable, aiAvailable, destGeo.nameVariants),
   ]);
